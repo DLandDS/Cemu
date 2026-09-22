@@ -46,6 +46,8 @@ void wxCemuConfig::Load(XMLConfigParser& parser)
 	window_maximized = parser.get("window_maximized", false);
 
 	pad_open = parser.get("open_pad", false);
+	stream_gamepad_srt_enabled = false;
+	stream_gamepad_srt_uri = parser.get("stream_gamepad_srt_uri", "srt://0.0.0.0:9700?mode=listener");
 	pad_position.x = parser.get("pad_position").get("x", -1);
 	pad_position.y = parser.get("pad_position").get("y", -1);
 
@@ -146,6 +148,8 @@ void wxCemuConfig::Save(XMLConfigParser& config)
 	config.set<bool>("window_maximized", window_maximized);
 
 	config.set<bool>("open_pad", pad_open);
+	config.set<bool>("stream_gamepad_srt_enabled", false);
+	config.set("stream_gamepad_srt_uri", stream_gamepad_srt_uri);
 	auto ppos = config.set("pad_position");
 	ppos.set<sint32>("x", pad_position.x);
 	ppos.set<sint32>("y", pad_position.y);

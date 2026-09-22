@@ -34,6 +34,8 @@ add_library(CemuCafe
   GraphicPack/GraphicPack2PatchesParser.cpp
   GraphicPack/GraphicPackError.h
   HW/ACR/ACR.cpp
+  HW/Latte/Renderer/GamePadSrtStreamer.cpp
+  HW/Latte/Renderer/GamePadSrtStreamer.h
   HW/AI/AI.cpp
   HW/AI/AI.h
   HW/Common/HwReg.h
@@ -659,6 +661,79 @@ target_link_libraries(CemuCafe PRIVATE
   PUBLIC
   OpenSSL::SSL
 )
+
+if (ENABLE_GSTREAMER_SRT)
+  if(WIN32)
+    set(PKG_CONFIG_EXECUTABLE "${VCPKG_INSTALLED_DIR}/x64-windows/tools/pkgconf/pkgconf.exe")
+  endif()
+  find_package(PkgConfig REQUIRED)
+  pkg_check_modules(GSTREAMER_FULL QUIET gstreamer-full-1.0>=1.24)
+  if(GSTREAMER_FULL_FOUND)
+    set(GSTREAMER_SRT_INCLUDE_DIRS ${GSTREAMER_FULL_INCLUDE_DIRS})
+    set(GSTREAMER_SRT_LIBRARY_DIRS ${GSTREAMER_FULL_STATIC_LIBRARY_DIRS})
+    set(GSTREAMER_SRT_LINK_LIBRARIES ${GSTREAMER_FULL_STATIC_LIBRARIES})
+    set(GSTREAMER_SRT_CFLAGS_OTHER ${GSTREAMER_FULL_CFLAGS_OTHER})
+    target_compile_definitions(CemuCafe PRIVATE CEMU_GST_FULL_STATIC)
+    if(MSVC)
+      # pkg-config includes Unix libm; MSVC's math runtime is already in the CRT.
+      list(REMOVE_ITEM GSTREAMER_SRT_LINK_LIBRARIES m)
+      # gst_init() calls the generated registrar, but MSVC does not honor
+      # gst-full's GNU --undefined linker flag from pkg-config.
+      target_link_options(CemuCafe INTERFACE "/INCLUDE:gst_init_static_plugins")
+    endif()
+  else()
+    if(WIN32 AND VCPKG_TARGET_TRIPLET MATCHES "static")
+      if(NOT VCPKG_MANIFEST_INSTALL)
+        message(FATAL_ERROR "GamePad SRT needs GStreamer from the active vcpkg manifest, but VCPKG_MANIFEST_INSTALL=OFF. Enable it and reconfigure this build directory.")
+      endif()
+      message(FATAL_ERROR "Static Windows GStreamer from vcpkg must provide gstreamer-full-1.0; check the repository overlay port")
+    endif()
+    pkg_check_modules(GSTREAMER_DYNAMIC REQUIRED gstreamer-1.0>=1.20 gstreamer-app-1.0 gstreamer-video-1.0)
+    set(GSTREAMER_SRT_INCLUDE_DIRS ${GSTREAMER_DYNAMIC_INCLUDE_DIRS})
+    set(GSTREAMER_SRT_LIBRARY_DIRS ${GSTREAMER_DYNAMIC_LIBRARY_DIRS})
+    set(GSTREAMER_SRT_LINK_LIBRARIES ${GSTREAMER_DYNAMIC_LINK_LIBRARIES})
+    set(GSTREAMER_SRT_CFLAGS_OTHER ${GSTREAMER_DYNAMIC_CFLAGS_OTHER})
+    target_compile_definitions(CemuCafe PRIVATE CEMU_GST_DYNAMIC_PLUGINS)
+    set(CEMU_GST_DYNAMIC_PLUGINS ON PARENT_SCOPE)
+  endif()
+  set(GSTREAMER_SRT_PACKAGES gstreamer-1.0 gstreamer-app-1.0 gstreamer-video-1.0)
+  if(GSTREAMER_FULL_FOUND)
+    list(APPEND GSTREAMER_SRT_PACKAGES gstreamer-full-1.0)
+  endif()
+  foreach(GSTREAMER_SRT_PKG IN LISTS GSTREAMER_SRT_PACKAGES)
+    pkg_get_variable(GSTREAMER_SRT_PKG_PREFIX ${GSTREAMER_SRT_PKG} prefix)
+    cmake_path(IS_PREFIX VCPKG_INSTALLED_DIR "${GSTREAMER_SRT_PKG_PREFIX}" NORMALIZE GSTREAMER_SRT_IS_VCPKG)
+    if(NOT GSTREAMER_SRT_IS_VCPKG)
+      message(FATAL_ERROR "${GSTREAMER_SRT_PKG} must come from the active vcpkg installation, not a system GStreamer SDK")
+    endif()
+  endforeach()
+  target_include_directories(CemuCafe PRIVATE ${GSTREAMER_SRT_INCLUDE_DIRS})
+  target_link_directories(CemuCafe INTERFACE ${GSTREAMER_SRT_LIBRARY_DIRS})
+  target_link_libraries(CemuCafe PRIVATE ${GSTREAMER_SRT_LINK_LIBRARIES})
+  target_compile_options(CemuCafe PRIVATE ${GSTREAMER_SRT_CFLAGS_OTHER})
+
+  option(BUILD_GSTREAMER_SRT_SMOKE_TEST "Build a synthetic frame GStreamer pipeline probe" OFF)
+  if(BUILD_GSTREAMER_SRT_SMOKE_TEST)
+    add_executable(GamePadSrtSmoke HW/Latte/Renderer/GamePadSrtSmoke.cpp)
+    if(MSVC)
+      set_property(TARGET GamePadSrtSmoke PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+    endif()
+    target_include_directories(GamePadSrtSmoke PRIVATE ${GSTREAMER_SRT_INCLUDE_DIRS})
+    target_link_directories(GamePadSrtSmoke PRIVATE ${GSTREAMER_SRT_LIBRARY_DIRS})
+    target_link_libraries(GamePadSrtSmoke PRIVATE ${GSTREAMER_SRT_LINK_LIBRARIES})
+    target_compile_options(GamePadSrtSmoke PRIVATE ${GSTREAMER_SRT_CFLAGS_OTHER})
+    if(GSTREAMER_FULL_FOUND)
+      target_compile_definitions(GamePadSrtSmoke PRIVATE CEMU_GST_FULL_STATIC)
+      if(MSVC)
+        target_link_options(GamePadSrtSmoke PRIVATE "/INCLUDE:gst_init_static_plugins")
+      endif()
+    else()
+      target_compile_definitions(GamePadSrtSmoke PRIVATE
+        CEMU_GST_DYNAMIC_PLUGINS
+        CEMU_GST_SMOKE_PLUGIN_DIR="$<IF:$<CONFIG:Debug>,${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/debug/plugins/gstreamer,${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/plugins/gstreamer>")
+    endif()
+  endif()
+endif()
 
 if (ENABLE_WAYLAND)
 	# PUBLIC because wayland-client.h is included in VulkanAPI.h

@@ -21,6 +21,8 @@
 #include "wxHelper.h"
 #include "helpers/wxHelpers.h"
 #include "PadViewFrame.h"
+#include "Cafe/HW/Latte/Renderer/GamePadSrtStreamer.h"
+#include <wx/textdlg.h>
 
 #if BOOST_OS_LINUX || BOOST_OS_MACOS || BOOST_OS_BSD
 #include "resource/embedded/resources.h"
@@ -84,6 +86,8 @@ enum
 	// options
 	MAINFRAME_MENU_ID_OPTIONS_FULLSCREEN = 20200,
 	MAINFRAME_MENU_ID_OPTIONS_SECOND_WINDOW_PADVIEW,
+	MAINFRAME_MENU_ID_OPTIONS_STREAM_GAMEPAD_SRT,
+	MAINFRAME_MENU_ID_OPTIONS_SRT_STREAM_SETTINGS,
 	MAINFRAME_MENU_ID_OPTIONS_GRAPHIC,
 	MAINFRAME_MENU_ID_OPTIONS_GRAPHIC_PACKS2,
 	MAINFRAME_MENU_ID_OPTIONS_GENERAL,
@@ -187,6 +191,8 @@ EVT_MENU_RANGE(MAINFRAME_MENU_ID_OPTIONS_LANGUAGE_JAPANESE, MAINFRAME_MENU_ID_OP
 // options menu
 EVT_MENU(MAINFRAME_MENU_ID_OPTIONS_FULLSCREEN, MainWindow::OnOptionsInput)
 EVT_MENU(MAINFRAME_MENU_ID_OPTIONS_SECOND_WINDOW_PADVIEW, MainWindow::OnOptionsInput)
+EVT_MENU(MAINFRAME_MENU_ID_OPTIONS_STREAM_GAMEPAD_SRT, MainWindow::OnOptionsInput)
+EVT_MENU(MAINFRAME_MENU_ID_OPTIONS_SRT_STREAM_SETTINGS, MainWindow::OnOptionsInput)
 EVT_MENU(MAINFRAME_MENU_ID_OPTIONS_GRAPHIC, MainWindow::OnOptionsInput)
 EVT_MENU(MAINFRAME_MENU_ID_OPTIONS_GRAPHIC_PACKS2, MainWindow::OnOptionsInput)
 EVT_MENU(MAINFRAME_MENU_ID_OPTIONS_GENERAL, MainWindow::OnOptionsInput)
@@ -438,6 +444,7 @@ wxString MainWindow::GetInitialWindowTitle()
 
 void MainWindow::OnClose(wxCloseEvent& event)
 {
+	GamePadSrtStreamer::Instance().Stop();
 	if (m_debugger_window)
 	{
 		m_debugger_window->CleanupForDestroy();
@@ -901,6 +908,43 @@ void MainWindow::OnOptionsInput(wxCommandEvent& event)
 		g_wxConfig.Save();
 
 		TogglePadView();
+		break;
+	}
+	case MAINFRAME_MENU_ID_OPTIONS_SRT_STREAM_SETTINGS:
+	{
+		wxTextEntryDialog dialog(this, _("SRT receiver URI:"), _("SRT stream settings"),
+			wxString::FromUTF8(GetWxGUIConfig().stream_gamepad_srt_uri.GetValue()));
+		if (dialog.ShowModal() == wxID_OK)
+		{
+			GetWxGUIConfig().stream_gamepad_srt_uri = dialog.GetValue().ToStdString();
+			g_wxConfig.Save();
+		}
+		break;
+	}
+	case MAINFRAME_MENU_ID_OPTIONS_STREAM_GAMEPAD_SRT:
+	{
+		auto& streamer = GamePadSrtStreamer::Instance();
+		if (!m_srtStreamMenuItem->IsChecked())
+		{
+			streamer.Stop();
+			GetWxGUIConfig().stream_gamepad_srt_enabled = false;
+			break;
+		}
+		if (ActiveSettings::GetGraphicsAPI() != kVulkan)
+		{
+			m_srtStreamMenuItem->Check(false);
+			wxMessageBox(_("GamePad SRT streaming requires the Vulkan graphics backend."),
+				_("GamePad SRT stream"), wxOK | wxICON_ERROR, this);
+			break;
+		}
+		std::string error;
+		if (!streamer.Start(GetWxGUIConfig().stream_gamepad_srt_uri, error))
+		{
+			m_srtStreamMenuItem->Check(false);
+			wxMessageBox(wxString::FromUTF8(error), _("GamePad SRT stream"), wxOK | wxICON_ERROR, this);
+			break;
+		}
+		GetWxGUIConfig().stream_gamepad_srt_enabled = true;
 		break;
 	}
 	case MAINFRAME_MENU_ID_OPTIONS_GRAPHIC_PACKS2:
@@ -1773,6 +1817,8 @@ void MainWindow::SetFullScreen(bool state)
 
 void MainWindow::EndEmulation() // unfinished - memory leaks and crashes after repeated use (after 3x usually)
 {
+	GamePadSrtStreamer::Instance().Stop();
+	GetWxGUIConfig().stream_gamepad_srt_enabled = false;
 	CafeSystem::ShutdownTitle();
 	DestroyCanvas();
 	m_game_launched = false;
@@ -1854,6 +1900,14 @@ bool MainWindow::IsMenuHidden() const
 
 void MainWindow::OnTimer(wxTimerEvent& event)
 {
+	if (auto error = GamePadSrtStreamer::Instance().TakeError(); !error.empty())
+	{
+		GamePadSrtStreamer::Instance().Stop();
+		GetWxGUIConfig().stream_gamepad_srt_enabled = false;
+		if (m_srtStreamMenuItem)
+			m_srtStreamMenuItem->Check(false);
+		wxMessageBox(wxString::FromUTF8(error), _("GamePad SRT stream"), wxOK | wxICON_ERROR, this);
+	}
 	if(m_update_available.valid() && future_is_ready(m_update_available))
 	{
 		if(m_update_available.get())
@@ -2226,6 +2280,11 @@ void MainWindow::RecreateMenu()
 
 	auto& config = GetConfig();
 	auto& wxConfig = GetWxGUIConfig();
+	if (GamePadSrtStreamer::Instance().IsCaptureRequested() && ActiveSettings::GetGraphicsAPI() != kVulkan)
+	{
+		GamePadSrtStreamer::Instance().Stop();
+		wxConfig.stream_gamepad_srt_enabled = false;
+	}
 	// options->console language submenu
 	wxMenu* optionsConsoleLanguageMenu = new wxMenu();
 	optionsConsoleLanguageMenu->AppendRadioItem(MAINFRAME_MENU_ID_OPTIONS_LANGUAGE_ENGLISH, _("&English"))->Check(config.console_language == CafeConsoleLanguage::EN);
@@ -2257,6 +2316,21 @@ void MainWindow::RecreateMenu()
 	optionsMenu->Append(MAINFRAME_MENU_ID_OPTIONS_GRAPHIC_PACKS2, _("&Graphic packs"));
 	m_padViewMenuItem = optionsMenu->AppendCheckItem(MAINFRAME_MENU_ID_OPTIONS_SECOND_WINDOW_PADVIEW, _("&Separate GamePad view"));
 	m_padViewMenuItem->Check(wxConfig.pad_open);
+	m_srtStreamMenuItem = optionsMenu->AppendCheckItem(MAINFRAME_MENU_ID_OPTIONS_STREAM_GAMEPAD_SRT, _("Stream GamePad to SRT"));
+	m_srtStreamMenuItem->Check(GamePadSrtStreamer::Instance().IsCaptureRequested());
+	optionsMenu->Append(MAINFRAME_MENU_ID_OPTIONS_SRT_STREAM_SETTINGS, _("SRT stream settings..."));
+#if !defined(ENABLE_GSTREAMER_SRT) || !defined(ENABLE_VULKAN)
+	m_srtStreamMenuItem->Enable(false);
+	m_srtStreamMenuItem->SetItemLabel(_("Stream GamePad to SRT (unavailable in this build)"));
+	m_srtStreamMenuItem->SetHelp(_("This build does not include Vulkan and GStreamer SRT streaming."));
+#else
+	if (ActiveSettings::GetGraphicsAPI() != kVulkan)
+	{
+		m_srtStreamMenuItem->Enable(false);
+		m_srtStreamMenuItem->SetItemLabel(_("Stream GamePad to SRT (requires Vulkan)"));
+		m_srtStreamMenuItem->SetHelp(_("GamePad SRT streaming requires the Vulkan graphics backend."));
+	}
+#endif
 	optionsMenu->AppendSeparator();
 	#if BOOST_OS_MACOS
 	optionsMenu->Append(MAINFRAME_MENU_ID_OPTIONS_MAC_SETTINGS, _("&Settings..." "\tCtrl-,"));

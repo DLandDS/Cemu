@@ -203,6 +203,7 @@ public:
 
 	void StopUsingPadAndWait();
 	bool IsPadWindowActive() override;
+	void CaptureGamePadStreamFrame(LatteTextureView* texView, RendererOutputShader* shader, bool useLinearTexFilter);
 
 	void HandleScreenshotRequest(LatteTextureView* texView, bool padView) override;
 
@@ -428,6 +429,24 @@ private:
 	}m_state;
 
 	std::unique_ptr<SwapchainInfoVk> m_mainSwapchainInfo{}, m_padSwapchainInfo{};
+	struct GamePadStreamSlot
+	{
+		VkImage image = VK_NULL_HANDLE;
+		VkDeviceMemory imageMemory = VK_NULL_HANDLE;
+		VkImageView imageView = VK_NULL_HANDLE;
+		VkFramebuffer framebuffer = VK_NULL_HANDLE;
+		VkBuffer buffer = VK_NULL_HANDLE;
+		VkDeviceMemory bufferMemory = VK_NULL_HANDLE;
+		uint8* mapped = nullptr;
+		uint64 commandBufferId = 0;
+		uint64 streamGeneration = 0;
+		bool pending = false;
+	};
+	VkRenderPass m_gamePadStreamRenderPass = VK_NULL_HANDLE;
+	std::array<GamePadStreamSlot, 3> m_gamePadStreamSlots{};
+	bool CreateGamePadStreamResources();
+	void DestroyGamePadStreamResources();
+	void UpdateGamePadStreamReadbacks();
 	std::atomic_flag m_destroyPadSwapchainNextAcquire{};
 	bool IsSwapchainInfoValid(bool mainWindow) const;
 
@@ -573,7 +592,7 @@ private:
 	// misc
 	void CreatePipelineCache();
 	VkPipelineShaderStageCreateInfo CreatePipelineShaderStageCreateInfo(VkShaderStageFlagBits stage, VkShaderModule& module, const char* entryName) const;
-	VkPipeline backbufferBlit_createGraphicsPipeline(VkDescriptorSetLayout descriptorLayout, bool padView, RendererOutputShader* shader);
+	VkPipeline backbufferBlit_createGraphicsPipeline(VkDescriptorSetLayout descriptorLayout, VkRenderPass renderPass, bool padView, RendererOutputShader* shader);
 	bool AcquireNextSwapchainImage(bool mainWindow);
 	void RecreateSwapchain(bool mainWindow, bool skipCreate = false);
 

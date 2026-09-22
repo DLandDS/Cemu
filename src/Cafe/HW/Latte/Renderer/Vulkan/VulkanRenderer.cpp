@@ -5,6 +5,7 @@
 #include "Cafe/HW/Latte/Renderer/Vulkan/VulkanTextureReadback.h"
 #include "Cafe/HW/Latte/Renderer/Vulkan/CocoaSurface.h"
 #include "Cafe/HW/Latte/Renderer/Vulkan/VulkanPipelineCompiler.h"
+#include "Cafe/HW/Latte/Renderer/GamePadSrtStreamer.h"
 
 #include "Cafe/HW/Latte/Core/LatteBufferCache.h"
 #include "Cafe/HW/Latte/Core/LattePerformanceMonitor.h"
@@ -858,6 +859,9 @@ VulkanRenderer::~VulkanRenderer()
 	SubmitCommandBuffer();
 	WaitDeviceIdle();
 	WaitCommandBufferFinished(GetCurrentCommandBufferId());
+	DestroyGamePadStreamResources();
+	if (m_gamePadStreamRenderPass != VK_NULL_HANDLE)
+		vkDestroyRenderPass(m_logicalDevice, m_gamePadStreamRenderPass, nullptr);
 	// shut down pipeline save thread
 	m_destructionRequested = true;
 	m_pipeline_cache_semaphore.notify();
@@ -2809,10 +2813,8 @@ VkPipelineShaderStageCreateInfo VulkanRenderer::CreatePipelineShaderStageCreateI
 	return shaderStageInfo;
 }
 
-VkPipeline VulkanRenderer::backbufferBlit_createGraphicsPipeline(VkDescriptorSetLayout descriptorLayout, bool padView, RendererOutputShader* shader)
+VkPipeline VulkanRenderer::backbufferBlit_createGraphicsPipeline(VkDescriptorSetLayout descriptorLayout, VkRenderPass renderPass, bool padView, RendererOutputShader* shader)
 {
-	auto& chainInfo = GetChainInfo(!padView);
-
 	RendererShaderVk* vertexRendererShader = static_cast<RendererShaderVk*>(shader->GetVertexShader());
 	RendererShaderVk* fragmentRendererShader = static_cast<RendererShaderVk*>(shader->GetFragmentShader());
 
@@ -2820,6 +2822,7 @@ VkPipeline VulkanRenderer::backbufferBlit_createGraphicsPipeline(VkDescriptorSet
 	hash += (uint64)vertexRendererShader;
 	hash += (uint64)fragmentRendererShader;
 	hash += ((uint64)padView) << 1;
+	hash += (uint64)renderPass;
 
 	const auto it = m_backbufferBlitPipelineCache.find(hash);
 	if (it != m_backbufferBlitPipelineCache.cend())
@@ -2909,7 +2912,7 @@ VkPipeline VulkanRenderer::backbufferBlit_createGraphicsPipeline(VkDescriptorSet
 	pipelineInfo.pMultisampleState = &multisampling;
 	pipelineInfo.pColorBlendState = &colorBlending;
 	pipelineInfo.layout = m_pipelineLayout;
-	pipelineInfo.renderPass = chainInfo.m_swapchainRenderPass;
+	pipelineInfo.renderPass = renderPass;
 	pipelineInfo.subpass = 0;
 	pipelineInfo.basePipelineHandle = VK_NULL_HANDLE;
 
@@ -3116,6 +3119,7 @@ void VulkanBenchmarkPrintResults();
 void VulkanRenderer::SwapBuffers(bool swapTV, bool swapDRC)
 {
 	SubmitCommandBuffer();
+	UpdateGamePadStreamReadbacks();
 
 	if (swapTV && IsSwapchainInfoValid(true))
 		SwapBuffer(true);
@@ -3205,6 +3209,246 @@ void VulkanRenderer::ClearColorImage(LatteTextureVk* vkTexture, uint32 sliceInde
 	vkTexture->SetImageLayout(subresourceRange, outputLayout);
 }
 
+bool VulkanRenderer::CreateGamePadStreamResources()
+{
+	using Streamer = GamePadSrtStreamer;
+	if (m_gamePadStreamSlots[0].image != VK_NULL_HANDLE)
+		return true;
+	if (m_gamePadStreamRenderPass == VK_NULL_HANDLE)
+	{
+		VkAttachmentDescription attachment{};
+		attachment.format = VK_FORMAT_R8G8B8A8_UNORM;
+		attachment.samples = VK_SAMPLE_COUNT_1_BIT;
+		attachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+		attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+		attachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+		attachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+		attachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+		attachment.finalLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+		VkAttachmentReference reference{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+		VkSubpassDescription subpass{};
+		subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+		subpass.colorAttachmentCount = 1;
+		subpass.pColorAttachments = &reference;
+		VkRenderPassCreateInfo info{VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO};
+		info.attachmentCount = 1;
+		info.pAttachments = &attachment;
+		info.subpassCount = 1;
+		info.pSubpasses = &subpass;
+		if (vkCreateRenderPass(m_logicalDevice, &info, nullptr, &m_gamePadStreamRenderPass) != VK_SUCCESS)
+			return false;
+	}
+
+	for (auto& slot : m_gamePadStreamSlots)
+	{
+		VkImageCreateInfo imageInfo{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+		imageInfo.imageType = VK_IMAGE_TYPE_2D;
+		imageInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+		imageInfo.extent = {Streamer::kWidth, Streamer::kHeight, 1};
+		imageInfo.mipLevels = 1;
+		imageInfo.arrayLayers = 1;
+		imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+		imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+		imageInfo.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+		imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+		if (vkCreateImage(m_logicalDevice, &imageInfo, nullptr, &slot.image) != VK_SUCCESS)
+			break;
+		VkMemoryRequirements requirements{};
+		vkGetImageMemoryRequirements(m_logicalDevice, slot.image, &requirements);
+		uint32 memoryType = 0;
+		if (!memoryManager->FindMemoryType(requirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, memoryType))
+			break;
+		VkMemoryAllocateInfo alloc{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+		alloc.allocationSize = requirements.size;
+		alloc.memoryTypeIndex = memoryType;
+		if (vkAllocateMemory(m_logicalDevice, &alloc, nullptr, &slot.imageMemory) != VK_SUCCESS ||
+			vkBindImageMemory(m_logicalDevice, slot.image, slot.imageMemory, 0) != VK_SUCCESS)
+			break;
+
+		VkImageViewCreateInfo viewInfo{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+		viewInfo.image = slot.image;
+		viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+		viewInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+		viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+		viewInfo.subresourceRange.levelCount = 1;
+		viewInfo.subresourceRange.layerCount = 1;
+		if (vkCreateImageView(m_logicalDevice, &viewInfo, nullptr, &slot.imageView) != VK_SUCCESS)
+			break;
+		VkFramebufferCreateInfo fbInfo{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
+		fbInfo.renderPass = m_gamePadStreamRenderPass;
+		fbInfo.attachmentCount = 1;
+		fbInfo.pAttachments = &slot.imageView;
+		fbInfo.width = Streamer::kWidth;
+		fbInfo.height = Streamer::kHeight;
+		fbInfo.layers = 1;
+		if (vkCreateFramebuffer(m_logicalDevice, &fbInfo, nullptr, &slot.framebuffer) != VK_SUCCESS)
+			break;
+		constexpr auto frameBytes = VkDeviceSize(Streamer::kWidth) * Streamer::kHeight * 4;
+		if (!memoryManager->CreateBuffer(frameBytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+			VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, slot.buffer, slot.bufferMemory))
+			break;
+		void* mapped = nullptr;
+		if (vkMapMemory(m_logicalDevice, slot.bufferMemory, 0, frameBytes, 0, &mapped) != VK_SUCCESS)
+			break;
+		slot.mapped = static_cast<uint8*>(mapped);
+	}
+	for (const auto& slot : m_gamePadStreamSlots)
+	{
+		if (!slot.mapped)
+		{
+			DestroyGamePadStreamResources();
+			return false;
+		}
+	}
+	return true;
+}
+
+void VulkanRenderer::DestroyGamePadStreamResources()
+{
+	for (auto& slot : m_gamePadStreamSlots)
+	{
+		if (slot.mapped)
+			vkUnmapMemory(m_logicalDevice, slot.bufferMemory);
+		slot.mapped = nullptr;
+		if (slot.buffer != VK_NULL_HANDLE || slot.bufferMemory != VK_NULL_HANDLE)
+			memoryManager->DeleteBuffer(slot.buffer, slot.bufferMemory);
+		if (slot.framebuffer != VK_NULL_HANDLE)
+			vkDestroyFramebuffer(m_logicalDevice, slot.framebuffer, nullptr);
+		if (slot.imageView != VK_NULL_HANDLE)
+			vkDestroyImageView(m_logicalDevice, slot.imageView, nullptr);
+		if (slot.image != VK_NULL_HANDLE)
+			vkDestroyImage(m_logicalDevice, slot.image, nullptr);
+		if (slot.imageMemory != VK_NULL_HANDLE)
+			vkFreeMemory(m_logicalDevice, slot.imageMemory, nullptr);
+		slot = {};
+	}
+}
+
+void VulkanRenderer::UpdateGamePadStreamReadbacks()
+{
+	auto& streamer = GamePadSrtStreamer::Instance();
+	bool pending = false;
+	for (auto& slot : m_gamePadStreamSlots)
+	{
+		if (slot.pending && HasCommandBufferFinished(slot.commandBufferId))
+		{
+			if (streamer.IsCaptureRequested() && slot.streamGeneration == streamer.Generation())
+				streamer.SubmitFrame(slot.mapped, size_t(streamer.kWidth) * streamer.kHeight * 4);
+			slot.pending = false;
+		}
+		pending |= slot.pending;
+	}
+	if (!streamer.IsCaptureRequested() && !pending && m_gamePadStreamSlots[0].image != VK_NULL_HANDLE)
+		DestroyGamePadStreamResources();
+}
+
+void VulkanRenderer::CaptureGamePadStreamFrame(LatteTextureView* texView, RendererOutputShader* shader, bool useLinearTexFilter)
+{
+	auto& streamer = GamePadSrtStreamer::Instance();
+	if (!streamer.IsCaptureRequested())
+		return;
+	UpdateGamePadStreamReadbacks();
+	if (!CreateGamePadStreamResources())
+	{
+		streamer.ReportCaptureError("Could not allocate Vulkan GamePad stream resources.");
+		return;
+	}
+	GamePadStreamSlot* slot = nullptr;
+	for (auto& candidate : m_gamePadStreamSlots)
+	{
+		if (!candidate.pending)
+		{
+			slot = &candidate;
+			break;
+		}
+	}
+	if (!slot)
+		return; // GPU is behind; drop this frame without stalling Latte.
+
+	draw_endRenderPass();
+	VkMemoryBarrier inputBarrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+	inputBarrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+	inputBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+	vkCmdPipelineBarrier(m_state.currentCommandBuffer,
+		VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
+		VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 1, &inputBarrier, 0, nullptr, 0, nullptr);
+
+	int sourceWidth, sourceHeight;
+	texView->baseTexture->GetEffectiveSize(sourceWidth, sourceHeight, 0);
+	int width = streamer.kWidth;
+	int height = streamer.kHeight;
+	if (GetConfig().fullscreen_scaling == kKeepAspectRatio && sourceWidth > 0 && sourceHeight > 0)
+	{
+		height = std::min(height, sourceHeight * width / sourceWidth);
+		if (height == streamer.kHeight)
+			width = std::min(width, sourceWidth * height / sourceHeight);
+	}
+	VkViewport viewport{};
+	viewport.x = float((streamer.kWidth - width) / 2);
+	viewport.y = float((streamer.kHeight - height) / 2);
+	viewport.width = float(width);
+	viewport.height = float(height);
+	viewport.minDepth = 0.0f;
+	viewport.maxDepth = 1.0f;
+	vkCmdSetViewport(m_state.currentCommandBuffer, 0, 1, &viewport);
+	VkRect2D scissor{{0, 0}, {streamer.kWidth, streamer.kHeight}};
+	vkCmdSetScissor(m_state.currentCommandBuffer, 0, 1, &scissor);
+
+	VkClearValue clear{};
+	VkRenderPassBeginInfo begin{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
+	begin.renderPass = m_gamePadStreamRenderPass;
+	begin.framebuffer = slot->framebuffer;
+	begin.renderArea = scissor;
+	begin.clearValueCount = 1;
+	begin.pClearValues = &clear;
+	auto pipeline = backbufferBlit_createGraphicsPipeline(m_swapchainDescriptorSetLayout, m_gamePadStreamRenderPass, true, shader);
+	auto descriptor = backbufferBlit_createDescriptorSet(m_swapchainDescriptorSetLayout,
+		static_cast<LatteTextureViewVk*>(texView), useLinearTexFilter);
+	auto uniforms = shader->FillUniformBlockBuffer(*texView, {width, height}, true);
+	auto uniformOffset = uniformData_uploadUniformDataBufferGetOffset({(uint8*)&uniforms, sizeof(uniforms)});
+	vkCmdBeginRenderPass(m_state.currentCommandBuffer, &begin, VK_SUBPASS_CONTENTS_INLINE);
+	vkCmdBindPipeline(m_state.currentCommandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+	m_state.currentPipeline = pipeline;
+	vkCmdBindDescriptorSets(m_state.currentCommandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+		m_pipelineLayout, 0, 1, &descriptor, 1, &uniformOffset);
+	vkCmdDraw(m_state.currentCommandBuffer, 6, 1, 0, 0);
+	vkCmdEndRenderPass(m_state.currentCommandBuffer);
+
+	VkImageMemoryBarrier outputBarrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+	outputBarrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+	outputBarrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+	outputBarrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+	outputBarrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+	outputBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	outputBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	outputBarrier.image = slot->image;
+	outputBarrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+	outputBarrier.subresourceRange.levelCount = 1;
+	outputBarrier.subresourceRange.layerCount = 1;
+	vkCmdPipelineBarrier(m_state.currentCommandBuffer, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+		VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &outputBarrier);
+	VkBufferImageCopy copy{};
+	copy.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+	copy.imageSubresource.layerCount = 1;
+	copy.imageExtent = {streamer.kWidth, streamer.kHeight, 1};
+	vkCmdCopyImageToBuffer(m_state.currentCommandBuffer, slot->image,
+		VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, slot->buffer, 1, &copy);
+	VkBufferMemoryBarrier hostBarrier{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
+	hostBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+	hostBarrier.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+	hostBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	hostBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+	hostBarrier.buffer = slot->buffer;
+	hostBarrier.size = VK_WHOLE_SIZE;
+	vkCmdPipelineBarrier(m_state.currentCommandBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
+		VK_PIPELINE_STAGE_HOST_BIT, 0, 0, nullptr, 1, &hostBarrier, 0, nullptr);
+	vkCmdSetViewport(m_state.currentCommandBuffer, 0, 1, &m_state.currentViewport);
+	vkCmdSetScissor(m_state.currentCommandBuffer, 0, 1, &m_state.currentScissorRect);
+	slot->commandBufferId = GetCurrentCommandBufferId();
+	slot->streamGeneration = streamer.Generation();
+	slot->pending = true;
+}
+
 void VulkanRenderer::DrawBackbufferQuad(LatteTextureView* texView, RendererOutputShader* shader, bool useLinearTexFilter, sint32 imageX, sint32 imageY, sint32 imageWidth, sint32 imageHeight, bool padView, bool clearBackground)
 {
 	if(!AcquireNextSwapchainImage(!padView))
@@ -3223,7 +3467,7 @@ void VulkanRenderer::DrawBackbufferQuad(LatteTextureView* texView, RendererOutpu
 	memoryBarrier.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_SHADER_READ_BIT;
 	vkCmdPipelineBarrier(m_state.currentCommandBuffer, srcStage, dstStage, 0, 1, &memoryBarrier, 0, nullptr, 0, nullptr);
 
-	auto pipeline = backbufferBlit_createGraphicsPipeline(m_swapchainDescriptorSetLayout, padView, shader);
+	auto pipeline = backbufferBlit_createGraphicsPipeline(m_swapchainDescriptorSetLayout, chainInfo.m_swapchainRenderPass, padView, shader);
 
 	VkRenderPassBeginInfo renderPassInfo = {};
 	renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;

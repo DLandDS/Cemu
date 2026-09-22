@@ -6,7 +6,19 @@
       "generator": "Ninja",
       "inheritEnvironments": [ "msvc_x64_x64" ],
       "buildRoot": "${projectDir}\\out\\build\\${name}",
-      "installRoot": "${projectDir}\\out\\install\\${name}"
+      "installRoot": "${projectDir}\\out\\install\\${name}",
+      "variables": [
+        {
+          "name": "ENABLE_GSTREAMER_SRT",
+          "value": "True",
+          "type": "BOOL"
+        },
+        {
+          "name": "VCPKG_MANIFEST_INSTALL",
+          "value": "True",
+          "type": "BOOL"
+        }
+      ]
     },
     {
       "name": "Release",
@@ -22,7 +34,19 @@
       "generator": "Ninja",
       "inheritEnvironments": [ "msvc_x64_x64" ],
       "buildRoot": "${projectDir}\\out\\build\\${name}",
-      "installRoot": "${projectDir}\\out\\install\\${name}"
+      "installRoot": "${projectDir}\\out\\install\\${name}",
+      "variables": [
+        {
+          "name": "ENABLE_GSTREAMER_SRT",
+          "value": "True",
+          "type": "BOOL"
+        },
+        {
+          "name": "VCPKG_MANIFEST_INSTALL",
+          "value": "True",
+          "type": "BOOL"
+        }
+      ]
     }
   ]
 }

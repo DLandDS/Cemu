@@ -16,6 +16,10 @@
 #include "WindowSystem.h"
 #include "Cafe/OS/libs/erreula/erreula.h"
 #include "input/InputManager.h"
+#include "Cafe/HW/Latte/Renderer/GamePadSrtStreamer.h"
+#ifdef ENABLE_GSTREAMER_SRT
+#include "Cafe/HW/Latte/Renderer/Vulkan/VulkanRenderer.h"
+#endif
 #include "Cafe/OS/libs/swkbd/swkbd.h"
 
 uint32 prevScissorX = 0;
@@ -881,6 +885,25 @@ void LatteRenderTarget_copyToBackbuffer(LatteTextureView* textureView, bool isPa
 	sint32 fullscreenWidth, fullscreenHeight;
 
 	LatteRenderTarget_getScreenImageArea(&imageX, &imageY, &imageWidth, &imageHeight, &fullscreenWidth, &fullscreenHeight, isPadView);
+	#ifdef ENABLE_GSTREAMER_SRT
+	if (isPadView && GamePadSrtStreamer::Instance().IsCaptureRequested() && !g_renderer->IsPadWindowActive())
+	{
+		// Choose the GamePad output filter for the offscreen target, not the
+		// main window size used by getScreenImageArea when the pad window is closed.
+		fullscreenWidth = GamePadSrtStreamer::kWidth;
+		fullscreenHeight = GamePadSrtStreamer::kHeight;
+		imageWidth = fullscreenWidth;
+		imageHeight = fullscreenHeight;
+		if (GetConfig().fullscreen_scaling == kKeepAspectRatio && effectiveWidth > 0 && effectiveHeight > 0)
+		{
+			imageHeight = std::min(imageHeight, effectiveHeight * imageWidth / effectiveWidth);
+			if (imageHeight == fullscreenHeight)
+				imageWidth = std::min(imageWidth, effectiveWidth * imageHeight / effectiveHeight);
+		}
+		imageX = (fullscreenWidth - imageWidth) / 2;
+		imageY = (fullscreenHeight - imageHeight) / 2;
+	}
+	#endif
 
 	bool clearBackground = false;
 	if (imageWidth != fullscreenWidth || imageHeight != fullscreenHeight)
@@ -963,6 +986,15 @@ void LatteRenderTarget_copyToBackbuffer(LatteTextureView* textureView, bool isPa
 		}
 	}
 	cemu_assert(shader);
+#ifdef ENABLE_GSTREAMER_SRT
+	if (isPadView && GamePadSrtStreamer::Instance().IsCaptureRequested() &&
+		g_renderer->GetType() == RendererAPI::Vulkan)
+	{
+		
+		static_cast<VulkanRenderer*>(g_renderer.get())->CaptureGamePadStreamFrame(textureView, shader,
+			filter == LatteTextureView::MagFilter::kLinear);
+	}
+#endif
 	g_renderer->DrawBackbufferQuad(textureView, shader, filter==LatteTextureView::MagFilter::kLinear, imageX, imageY, imageWidth, imageHeight, isPadView, clearBackground);
 	g_renderer->HandleScreenshotRequest(textureView, isPadView);
 	if (!g_renderer->ImguiBegin(!isPadView))
@@ -1008,7 +1040,11 @@ void LatteRenderTarget_itHLECopyColorBufferToScanBuffer(MPTR colorBufferPtr, uin
 
 	bool showDRC = swkbd_hasKeyboardInputHook() == false && (isDRCPrimary ^ altScreenRequested);
 
-	if ((renderTarget & RENDER_TARGET_DRC) && g_renderer->IsPadWindowActive())
+	bool copyToPadOutput = g_renderer->IsPadWindowActive();
+#ifdef ENABLE_GSTREAMER_SRT
+	copyToPadOutput |= GamePadSrtStreamer::Instance().IsCaptureRequested();
+#endif
+	if ((renderTarget & RENDER_TARGET_DRC) && copyToPadOutput)
 		LatteRenderTarget_copyToBackbuffer(texView, true);
 	if (((renderTarget & RENDER_TARGET_TV) && !showDRC) || ((renderTarget & RENDER_TARGET_DRC) && showDRC))
 		LatteRenderTarget_copyToBackbuffer(texView, false);

@@ -69,6 +69,23 @@
     },
     "libusb"
   ],
+  "features": {
+    "srt-stream": {
+      "description": "Stream the GamePad video to an SRT receiver",
+      "dependencies": [
+        {
+          "name": "gstreamer",
+          "default-features": false,
+          "features": [
+            "plugins-base",
+            "plugins-good",
+            "srt",
+            "openh264"
+          ]
+        }
+      ]
+    }
+  },
   "overrides": [
     {
       "name": "glslang",

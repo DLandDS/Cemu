@@ -1,0 +1,99 @@
+// Optional build and runtime probe for the vcpkg GStreamer feature. With no
+// arguments it encodes synthetic frames to fakesink; pass an SRT URI to send.
+#include <gst/app/gstappsrc.h>
+#include <gst/gst.h>
+
+#include <array>
+#include <cstdint>
+#include <iostream>
+#include <vector>
+
+int main(int argc, char** argv)
+{
+	#ifdef CEMU_GST_FULL_STATIC
+	g_setenv("GST_PLUGIN_SYSTEM_PATH", "", TRUE);
+	g_setenv("GST_PLUGIN_SYSTEM_PATH_1_0", "", TRUE);
+	g_setenv("GST_PLUGIN_PATH", "", TRUE);
+	g_setenv("GST_PLUGIN_PATH_1_0", "", TRUE);
+	#endif
+	#ifdef CEMU_GST_DYNAMIC_PLUGINS
+	g_setenv("GST_PLUGIN_SYSTEM_PATH", "", TRUE);
+	g_setenv("GST_PLUGIN_SYSTEM_PATH_1_0", "", TRUE);
+	g_setenv("GST_PLUGIN_PATH", CEMU_GST_SMOKE_PLUGIN_DIR, TRUE);
+	g_setenv("GST_PLUGIN_PATH_1_0", CEMU_GST_SMOKE_PLUGIN_DIR, TRUE);
+	#endif
+	if (!gst_init_check(&argc, &argv, nullptr))
+		return 1;
+	for (const char* name : {"appsrc", "videoconvert", "openh264enc", "h264parse", "mpegtsmux", "srtsink"})
+	{
+		GstElementFactory* factory = gst_element_factory_find(name);
+		if (!factory)
+		{
+			std::cerr << "Missing GStreamer element: " << name << '\n';
+			return 2;
+		}
+		gst_object_unref(factory);
+	}
+
+	constexpr int width = 854;
+	constexpr int height = 480;
+	const bool sendToSrt = argc > 1;
+	const std::array<const char*, 6> names{"appsrc", "videoconvert", "openh264enc", "h264parse", "mpegtsmux", sendToSrt ? "srtsink" : "fakesink"};
+	GstElement* pipeline = gst_pipeline_new("srt-smoke");
+	std::array<GstElement*, names.size()> elements{};
+	if (!pipeline)
+		return 3;
+	for (size_t i = 0; i < names.size(); ++i)
+	{
+		elements[i] = gst_element_factory_make(names[i], nullptr);
+		if (!elements[i])
+			return 3;
+		gst_bin_add(GST_BIN(pipeline), elements[i]);
+		if (i && !gst_element_link(elements[i - 1], elements[i]))
+			return 4;
+	}
+	GstCaps* caps = gst_caps_new_simple("video/x-raw", "format", G_TYPE_STRING, "RGBA",
+		"width", G_TYPE_INT, width, "height", G_TYPE_INT, height,
+		"framerate", GST_TYPE_FRACTION, 60, 1, nullptr);
+	gst_app_src_set_caps(GST_APP_SRC(elements[0]), caps);
+	gst_caps_unref(caps);
+	g_object_set(elements[0], "format", GST_FORMAT_TIME, nullptr);
+	if (sendToSrt)
+		g_object_set(elements.back(), "uri", argv[1], nullptr);
+	if (gst_element_set_state(pipeline, GST_STATE_PLAYING) == GST_STATE_CHANGE_FAILURE)
+		return 5;
+
+	std::vector<uint8_t> pixels(size_t(width) * height * 4);
+	for (int frame = 0; frame < 60; ++frame)
+	{
+		for (int y = 0; y < height; ++y)
+			for (int x = 0; x < width; ++x)
+			{
+				const size_t i = (size_t(y) * width + x) * 4;
+				pixels[i] = uint8_t((x + frame * 4) & 255);
+				pixels[i + 1] = uint8_t(y & 255);
+				pixels[i + 2] = uint8_t(frame * 4);
+				pixels[i + 3] = 255;
+			}
+		GstBuffer* buffer = gst_buffer_new_allocate(nullptr, pixels.size(), nullptr);
+		if (!buffer)
+			return 6;
+		gst_buffer_fill(buffer, 0, pixels.data(), pixels.size());
+		GST_BUFFER_PTS(buffer) = uint64_t(frame) * GST_SECOND / 60;
+		GST_BUFFER_DURATION(buffer) = GST_SECOND / 60;
+		if (gst_app_src_push_buffer(GST_APP_SRC(elements[0]), buffer) != GST_FLOW_OK)
+			return 7;
+	}
+	gst_app_src_end_of_stream(GST_APP_SRC(elements[0]));
+	GstBus* bus = gst_element_get_bus(pipeline);
+	GstMessage* message = gst_bus_timed_pop_filtered(bus, 15 * GST_SECOND,
+		GstMessageType(GST_MESSAGE_EOS | GST_MESSAGE_ERROR));
+	const bool success = message && GST_MESSAGE_TYPE(message) == GST_MESSAGE_EOS;
+	if (message)
+		gst_message_unref(message);
+	gst_object_unref(bus);
+	gst_element_set_state(pipeline, GST_STATE_NULL);
+	gst_object_unref(pipeline);
+	std::cout << (success ? "Synthetic H.264 MPEG-TS pipeline passed\n" : "Synthetic pipeline failed or timed out\n");
+	return success ? 0 : 8;
+}

@@ -244,6 +244,7 @@ Example usage: `cmake -S . -B build -DCMAKE_BUILD_TYPE=release -DENABLE_SDL=ON -
 | CEMU_CXX_FLAGS     |   | Flags passed straight to the compiler, e.g. `-march=native`, `-Wall`, `/W3` | ""      |                    |
 | ENABLE_CUBEB       |   | Enable cubeb audio backend                                                  | ON      |                    |
 | ENABLE_DISCORD_RPC |   | Enable Discord Rich presence support                                        | ON      |                    |
+| ENABLE_GSTREAMER_SRT | | Stream Vulkan GamePad video to SRT through vcpkg GStreamer              | OFF     | Requires ENABLE_VCPKG and ENABLE_VULKAN |
 | ENABLE_OPENGL      |   | Enable OpenGL graphics backend                                              | ON      |                    |
 | ENABLE_HIDAPI      |   | Enable HIDAPI (used for Wiimote controller API)                             | ON      |                    |
 | ENABLE_SDL         |   | Enable SDLController controller API                                         | ON      |                    |
@@ -271,3 +272,34 @@ Example usage: `cmake -S . -B build -DCMAKE_BUILD_TYPE=release -DENABLE_SDL=ON -
 | Flag         | Description                                    | Default |
 |--------------|------------------------------------------------|---------|
 | MACOS_BUNDLE | macOS executable will be an application bundle | OFF     |
+
+## GamePad SRT streaming
+
+Configure with `-DENABLE_GSTREAMER_SRT=ON`. This activates the optional
+`srt-stream` vcpkg manifest feature. The feature needs GStreamer core, app,
+video, and the `appsrc`, `videoconvert`, `openh264enc`, `h264parse`, `mpegtsmux`,
+and `srtsink` elements. For static triplets, the repository's GStreamer
+overlay builds `gstreamer-full-1.0` so these plugins register inside Cemu.
+For dynamic triplets, CMake links core, app, and video and copies vcpkg's
+plugins next to the executable. A system GStreamer SDK is not used.
+
+To verify the installed elements and encoder independently of Vulkan, also
+configure with `-DBUILD_GSTREAMER_SRT_SMOKE_TEST=ON`, build the
+`GamePadSrtSmoke` target, and run it without arguments. It pushes 60 synthetic
+frames through H.264 and MPEG-TS to a local fakesink. Pass an SRT URI as its
+first argument to exercise `srtsink` with a receiver.
+
+In Cemu, set the receiver URI under **Options > SRT stream settings...** and
+select **Options > Stream GamePad to SRT**. The default URI is
+`srt://127.0.0.1:9000?mode=caller`. The receiver must listen on the chosen
+port. Video is 854×480 RGBA before H.264 encoding, with no audio. The saved
+URI is restored, but streaming always starts disabled. The URI query can
+contain a passphrase, so it is intentionally excluded from Cemu logs.
+For a manual local receiver check, start
+`ffplay "srt://127.0.0.1:9000?mode=listener"` before enabling the stream.
+
+When packaging a dynamic vcpkg triplet, include GStreamer's plugin-dependent
+libraries from `vcpkg_installed/<triplet>/bin` or `lib` (or the corresponding
+debug paths) alongside the copied plugins. Verify the
+plugin factories on each packaged platform. Review GStreamer, OpenH264, SRT,
+and H.264 distribution terms before shipping binaries.

@@ -1,6 +1,7 @@
 cmake_minimum_required(VERSION 3.21.1)
 
 option(ENABLE_VCPKG "Enable the vcpkg package manager" ON)
+option(ENABLE_GSTREAMER_SRT "Enable GamePad SRT streaming through GStreamer" OFF)
 option(MACOS_BUNDLE "The executable when built on macOS will be created as an application bundle" OFF)
 option(ALLOW_PORTABLE "Allow Cemu to be run in portable mode" ON)
 
@@ -20,6 +21,9 @@ execute_process(
 add_definitions(-DEMULATOR_HASH=${GIT_HASH})
 
 if (ENABLE_VCPKG)
+	if (ENABLE_GSTREAMER_SRT)
+		list(APPEND VCPKG_MANIFEST_FEATURES srt-stream)
+	endif()
 	# check if vcpkg is shallow and unshallow it if necessary
 	execute_process(
 	COMMAND git rev-parse --is-shallow-repository
@@ -55,7 +59,15 @@ if (ENABLE_VCPKG)
 	endif()
 endif()
 
+if (ENABLE_GSTREAMER_SRT AND NOT ENABLE_VCPKG)
+	message(FATAL_ERROR "ENABLE_GSTREAMER_SRT requires ENABLE_VCPKG=ON")
+endif()
+
 project(Cemu VERSION 2.0.0)
+
+if (ENABLE_GSTREAMER_SRT)
+	add_compile_definitions(ENABLE_GSTREAMER_SRT)
+endif()
 
 list(APPEND CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/cmake")
 
@@ -118,6 +130,9 @@ endif()
 
 option(ENABLE_OPENGL "Enables the OpenGL backend" ${ENABLE_OPENGL_DEFAULT})
 option(ENABLE_VULKAN "Enables the Vulkan backend" ON)
+if (ENABLE_GSTREAMER_SRT AND NOT ENABLE_VULKAN)
+	message(FATAL_ERROR "ENABLE_GSTREAMER_SRT requires ENABLE_VULKAN=ON")
+endif()
 option(ENABLE_METAL "Enables the Metal backend" ${ENABLE_METAL_DEFAULT})
 option(ENABLE_DISCORD_RPC "Enables the Discord Rich Presence feature" ON)
 

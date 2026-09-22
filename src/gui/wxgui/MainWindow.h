@@ -226,6 +226,7 @@ private:
 
 	wxMenuItem* m_fullscreenMenuItem{};
 	wxMenuItem* m_padViewMenuItem{};
+	wxMenuItem* m_srtStreamMenuItem{};
 
 	// tools
 	wxMenuItem* m_memorySearcherMenuItem{};

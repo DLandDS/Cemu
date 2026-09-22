@@ -69,6 +69,18 @@ add_executable(CemuBin
 	mainLLE.cpp
 )
 
+if(CEMU_GST_DYNAMIC_PLUGINS)
+	set(CEMU_GST_PLUGIN_DIR "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/plugins/gstreamer")
+	set(CEMU_GST_DEBUG_PLUGIN_DIR "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/debug/plugins/gstreamer")
+	if(NOT EXISTS "${CEMU_GST_PLUGIN_DIR}")
+		message(FATAL_ERROR "vcpkg GStreamer plugins were not found at ${CEMU_GST_PLUGIN_DIR}")
+	endif()
+	add_custom_command(TARGET CemuBin POST_BUILD
+		COMMAND ${CMAKE_COMMAND} -E copy_directory
+			"$<IF:$<CONFIG:Debug>,${CEMU_GST_DEBUG_PLUGIN_DIR},${CEMU_GST_PLUGIN_DIR}>"
+			"$<TARGET_FILE_DIR:CemuBin>/plugins/gstreamer")
+endif()
+
 cemu_use_precompiled_header(CemuBin)
 
 if(MSVC AND MSVC_VERSION EQUAL 1940)
