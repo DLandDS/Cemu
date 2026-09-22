@@ -440,6 +440,7 @@ private:
 		uint8* mapped = nullptr;
 		uint64 commandBufferId = 0;
 		uint64 streamGeneration = 0;
+		uint64 captureTimestampNs = 0;
 		bool pending = false;
 	};
 	VkRenderPass m_gamePadStreamRenderPass = VK_NULL_HANDLE;

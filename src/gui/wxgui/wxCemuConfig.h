@@ -92,6 +92,7 @@ struct wxCemuConfig
 	ConfigValue<bool> pad_open;
 	ConfigValue<bool> stream_gamepad_srt_enabled{false}; // session state; never restored at launch
 	ConfigValue<std::string> stream_gamepad_srt_uri{"srt://127.0.0.1:9700?mode=listener"};
+	ConfigValue<std::string> stream_gamepad_srt_encoder{"auto"};
 	Vector2i pad_position{-1, -1};
 	Vector2i pad_size{-1, -1};
 	ConfigValue<bool> pad_maximized;

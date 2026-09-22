@@ -29,6 +29,7 @@
 
 #include "Cafe/HW/Latte/Core/LatteTiming.h" // vsync control
 
+#include <chrono>
 #include <cstdint>
 #include <glslang/Public/ShaderLang.h>
 
@@ -3333,7 +3334,11 @@ void VulkanRenderer::UpdateGamePadStreamReadbacks()
 		if (slot.pending && HasCommandBufferFinished(slot.commandBufferId))
 		{
 			if (streamer.IsCaptureRequested() && slot.streamGeneration == streamer.Generation())
-				streamer.SubmitFrame(slot.mapped, size_t(streamer.kWidth) * streamer.kHeight * 4);
+			{
+				streamer.RecordReadbackCompletion(slot.captureTimestampNs);
+				streamer.SubmitFrame(slot.mapped, size_t(streamer.kWidth) * streamer.kHeight * 4,
+					slot.captureTimestampNs);
+			}
 			slot.pending = false;
 		}
 		pending |= slot.pending;
@@ -3363,7 +3368,10 @@ void VulkanRenderer::CaptureGamePadStreamFrame(LatteTextureView* texView, Render
 		}
 	}
 	if (!slot)
+	{
+		streamer.RecordCaptureDrop();
 		return; // GPU is behind; drop this frame without stalling Latte.
+	}
 
 	draw_endRenderPass();
 	VkMemoryBarrier inputBarrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
@@ -3446,6 +3454,9 @@ void VulkanRenderer::CaptureGamePadStreamFrame(LatteTextureView* texView, Render
 	vkCmdSetScissor(m_state.currentCommandBuffer, 0, 1, &m_state.currentScissorRect);
 	slot->commandBufferId = GetCurrentCommandBufferId();
 	slot->streamGeneration = streamer.Generation();
+	slot->captureTimestampNs = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+		std::chrono::steady_clock::now().time_since_epoch()).count());
+	streamer.RecordCapture();
 	slot->pending = true;
 }
 

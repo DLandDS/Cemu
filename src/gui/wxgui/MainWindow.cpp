@@ -22,7 +22,11 @@
 #include "helpers/wxHelpers.h"
 #include "PadViewFrame.h"
 #include "Cafe/HW/Latte/Renderer/GamePadSrtStreamer.h"
-#include <wx/textdlg.h>
+#include <wx/choice.h>
+#include <wx/dialog.h>
+#include <wx/sizer.h>
+#include <wx/stattext.h>
+#include <wx/textctrl.h>
 
 #if BOOST_OS_LINUX || BOOST_OS_MACOS || BOOST_OS_BSD
 #include "resource/embedded/resources.h"
@@ -912,11 +916,32 @@ void MainWindow::OnOptionsInput(wxCommandEvent& event)
 	}
 	case MAINFRAME_MENU_ID_OPTIONS_SRT_STREAM_SETTINGS:
 	{
-		wxTextEntryDialog dialog(this, _("SRT receiver URI:"), _("SRT stream settings"),
+		wxDialog dialog(this, wxID_ANY, _("SRT stream settings"));
+		auto* layout = new wxBoxSizer(wxVERTICAL);
+		auto* fields = new wxFlexGridSizer(2, 8, 8);
+		fields->AddGrowableCol(1);
+		fields->Add(new wxStaticText(&dialog, wxID_ANY, _("SRT receiver URI:")), 0, wxALIGN_CENTER_VERTICAL);
+		auto* uri = new wxTextCtrl(&dialog, wxID_ANY,
 			wxString::FromUTF8(GetWxGUIConfig().stream_gamepad_srt_uri.GetValue()));
+		uri->SetMinSize(wxSize(420, -1));
+		fields->Add(uri, 1, wxEXPAND);
+		fields->Add(new wxStaticText(&dialog, wxID_ANY, _("Encoder:")), 0, wxALIGN_CENTER_VERTICAL);
+		auto* encoder = new wxChoice(&dialog, wxID_ANY);
+		encoder->Append(_("Automatic (Intel Quick Sync, then OpenH264)"));
+		encoder->Append(_("Intel Quick Sync"));
+		encoder->Append(_("Software OpenH264"));
+		const auto& savedEncoder = GetWxGUIConfig().stream_gamepad_srt_encoder.GetValue();
+		encoder->SetSelection(savedEncoder == "qsv" ? 1 : savedEncoder == "openh264" ? 2 : 0);
+		fields->Add(encoder, 1, wxEXPAND);
+		layout->Add(fields, 1, wxEXPAND | wxALL, 10);
+		layout->Add(dialog.CreateButtonSizer(wxOK | wxCANCEL), 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 10);
+		dialog.SetSizerAndFit(layout);
+		dialog.CentreOnParent();
 		if (dialog.ShowModal() == wxID_OK)
 		{
-			GetWxGUIConfig().stream_gamepad_srt_uri = dialog.GetValue().ToStdString();
+			GetWxGUIConfig().stream_gamepad_srt_uri = uri->GetValue().ToStdString();
+			GetWxGUIConfig().stream_gamepad_srt_encoder =
+				encoder->GetSelection() == 1 ? "qsv" : encoder->GetSelection() == 2 ? "openh264" : "auto";
 			g_wxConfig.Save();
 		}
 		break;
@@ -938,7 +963,10 @@ void MainWindow::OnOptionsInput(wxCommandEvent& event)
 			break;
 		}
 		std::string error;
-		if (!streamer.Start(GetWxGUIConfig().stream_gamepad_srt_uri, error))
+		const auto& encoderId = GetWxGUIConfig().stream_gamepad_srt_encoder.GetValue();
+		const auto selectedEncoder = encoderId == "qsv" ? GamePadSrtStreamer::Encoder::QuickSync :
+			encoderId == "openh264" ? GamePadSrtStreamer::Encoder::OpenH264 : GamePadSrtStreamer::Encoder::Auto;
+		if (!streamer.Start(GetWxGUIConfig().stream_gamepad_srt_uri, selectedEncoder, error))
 		{
 			m_srtStreamMenuItem->Check(false);
 			wxMessageBox(wxString::FromUTF8(error), _("GamePad SRT stream"), wxOK | wxICON_ERROR, this);

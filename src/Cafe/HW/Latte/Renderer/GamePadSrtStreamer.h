@@ -15,17 +15,21 @@
 class GamePadSrtStreamer
 {
 public:
+	enum class Encoder { Auto, QuickSync, OpenH264 };
 	static constexpr uint32_t kWidth = 854;
 	static constexpr uint32_t kHeight = 480;
 	static GamePadSrtStreamer& Instance();
 
-	bool Start(const std::string& uri, std::string& error);
+	bool Start(const std::string& uri, Encoder encoder, std::string& error);
 	void Stop();
 	bool IsCaptureRequested() const { return m_captureRequested.load(std::memory_order_acquire); }
 	bool IsRunning() const { return m_running.load(std::memory_order_acquire); }
 	uint64_t Generation() const { return m_generation.load(std::memory_order_acquire); }
 	std::string TakeError();
-	void SubmitFrame(const uint8_t* rgba, size_t size);
+	void SubmitFrame(const uint8_t* rgba, size_t size, uint64_t captureTimestampNs);
+	void RecordCapture() { m_captureFrames.fetch_add(1, std::memory_order_relaxed); }
+	void RecordCaptureDrop() { m_captureDrops.fetch_add(1, std::memory_order_relaxed); }
+	void RecordReadbackCompletion(uint64_t captureTimestampNs);
 	void ReportCaptureError(std::string error) { Fail(std::move(error)); }
 
 private:
@@ -33,7 +37,7 @@ private:
 	~GamePadSrtStreamer();
 	GamePadSrtStreamer(const GamePadSrtStreamer&) = delete;
 	GamePadSrtStreamer& operator=(const GamePadSrtStreamer&) = delete;
-	void Worker(std::string uri);
+	void Worker(std::string uri, Encoder encoder);
 	void Fail(std::string error);
 
 	struct Frame
@@ -50,4 +54,10 @@ private:
 	std::deque<Frame> m_frames;
 	std::string m_error;
 	std::thread m_worker;
+	std::atomic_uint64_t m_captureDrops{0};
+	std::atomic_uint64_t m_captureFrames{0};
+	std::atomic_uint64_t m_queueDrops{0};
+	std::atomic_uint64_t m_readbackFrames{0};
+	std::atomic_uint64_t m_readbackTotalNs{0};
+	std::atomic_uint64_t m_readbackMaxNs{0};
 };
