@@ -7,6 +7,7 @@
 #include "util/helpers/helpers.h"
 
 #include "Cafe/OS/libs/snd_core/ax.h"
+#include "Cafe/HW/Latte/Renderer/GamePadSrtStreamer.h"
 
 #include <wx/collpane.h>
 #include <wx/clrpicker.h>
@@ -1360,7 +1361,14 @@ void GeneralSettings2::OnVolumeChanged(wxCommandEvent& event)
 		if(event.GetEventObject() == m_pad_volume)
 		{
 			if (g_padAudio)
-				g_padAudio->SetVolume(event.GetInt());
+			{
+				int volume = event.GetInt();
+#ifdef ENABLE_GSTREAMER_SRT
+				if (GamePadSrtStreamer::Instance().IsConnected())
+					volume = 0;
+#endif
+				g_padAudio->SetVolume(volume);
+			}
 
 			g_padVolume = event.GetInt();
 		}
@@ -2179,7 +2187,12 @@ void GeneralSettings2::UpdateAudioDevice()
 				try
 				{
 					g_padAudio = IAudioAPI::CreateDevice((IAudioAPI::AudioAPI)config.audio_api, description->GetDescription(), 48000, channels, snd_core::AX_SAMPLES_PER_3MS_48KHZ * AX_FRAMES_PER_GROUP, 16);
-					g_padAudio->SetVolume(m_pad_volume->GetValue());
+					int volume = m_pad_volume->GetValue();
+#ifdef ENABLE_GSTREAMER_SRT
+					if (GamePadSrtStreamer::Instance().IsConnected())
+						volume = 0;
+#endif
+					g_padAudio->SetVolume(volume);
 				}
 				catch (std::runtime_error& ex)
 				{

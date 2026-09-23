@@ -1,7 +1,9 @@
 #pragma once
 
+#include <array>
 #include <atomic>
 #include <condition_variable>
+#include <cstddef>
 #include <cstdint>
 #include <deque>
 #include <mutex>
@@ -19,6 +21,7 @@ public:
 	enum class Encoder { Auto, QuickSync, OpenH264 };
 	static constexpr uint32_t kWidth = 854;
 	static constexpr uint32_t kHeight = 480;
+	static constexpr size_t kAudioFramesPerBlock = 576;
 	static GamePadSrtStreamer& Instance();
 
 	static bool ValidateCallerUri(std::string_view uri, std::string& error);
@@ -30,6 +33,7 @@ public:
 	uint64_t Generation() const { return m_generation.load(std::memory_order_acquire); }
 	std::string TakeError();
 	void SubmitFrame(const uint8_t* rgba, size_t size, uint64_t captureTimestampNs);
+	void SubmitAudio(const int16_t* stereo, size_t frames, uint64_t firstSampleTimestampNs);
 	void RecordCapture() { m_captureFrames.fetch_add(1, std::memory_order_relaxed); }
 	void RecordCaptureDrop() { m_captureDrops.fetch_add(1, std::memory_order_relaxed); }
 	void RecordReadbackCompletion(uint64_t captureTimestampNs);
@@ -48,6 +52,12 @@ private:
 		std::vector<uint8_t> pixels;
 		uint64_t timestampNs{};
 	};
+	struct AudioBlock
+	{
+		std::array<int16_t, kAudioFramesPerBlock * 2> samples{};
+		uint64_t timestampNs{};
+		bool discontinuity{};
+	};
 	std::atomic_bool m_captureRequested{false};
 	std::atomic_bool m_running{false};
 	std::atomic_bool m_connected{false};
@@ -56,11 +66,14 @@ private:
 	std::mutex m_mutex;
 	std::condition_variable m_wake;
 	std::deque<Frame> m_frames;
+	std::deque<AudioBlock> m_audioBlocks;
+	std::atomic_bool m_audioDiscontinuity{false};
 	std::string m_error;
 	std::thread m_worker;
 	std::atomic_uint64_t m_captureDrops{0};
 	std::atomic_uint64_t m_captureFrames{0};
 	std::atomic_uint64_t m_queueDrops{0};
+	std::atomic_uint64_t m_audioQueueDrops{0};
 	std::atomic_uint64_t m_readbackFrames{0};
 	std::atomic_uint64_t m_readbackTotalNs{0};
 	std::atomic_uint64_t m_readbackMaxNs{0};

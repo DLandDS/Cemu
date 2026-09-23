@@ -1,9 +1,12 @@
 #include "Cafe/OS/libs/snd_core/ax.h"
 #include "Cafe/OS/libs/snd_core/ax_internal.h"
 #include "Cafe/HW/MMU/MMU.h"
+#include "Cafe/HW/Latte/Renderer/GamePadSrtStreamer.h"
 #include "audio/IAudioAPI.h"
 //#include "ax.h"
 #include "config/CemuConfig.h"
+
+#include <chrono>
 
 namespace snd_core
 {
@@ -161,6 +164,11 @@ namespace snd_core
 
 	sint16 tempDRCChannelData[AX_SAMPLES_MAX * 6 * AX_FRAMES_PER_GROUP] = {};
 	sint32 tempDRCAudioBlockCounter = 0;
+#ifdef ENABLE_GSTREAMER_SRT
+	sint16 tempDRCStreamData[GamePadSrtStreamer::kAudioFramesPerBlock * 2] = {};
+	sint32 tempDRCStreamBlockCounter = 0;
+	uint64_t tempDRCStreamGeneration = 0;
+#endif
 
 	void AIInitDMA(sint16* sampleData, sint32 size)
 	{
@@ -307,23 +315,56 @@ namespace snd_core
 			cemu_assert(false);
 		}
 
-		std::shared_lock lock(g_audioMutex);
-
-		const uint32 channels = g_padAudio ? g_padAudio->GetChannels() : AX_DRC_CHANNEL_COUNT;
-		sint16* outputChannel = tempDRCChannelData + AX_SAMPLES_PER_3MS_48KHZ * tempDRCAudioBlockCounter * channels;
-		for (sint32 i = 0; i < sampleCount; ++i)
+#ifdef ENABLE_GSTREAMER_SRT
+		auto& streamer = GamePadSrtStreamer::Instance();
+		const auto generation = streamer.Generation();
+		if (tempDRCStreamGeneration != generation)
 		{
-			outputChannel[i] = _swapEndianS16(sampleData[i]);
+			tempDRCStreamBlockCounter = 0;
+			tempDRCStreamGeneration = generation;
 		}
-
-		tempDRCAudioBlockCounter++;
-		if (tempDRCAudioBlockCounter == AX_FRAMES_PER_GROUP)
+		const sint32 inputChannels = sampleCount / AX_SAMPLES_PER_3MS_48KHZ;
+		bool streamBlockReady = false;
+		if (streamer.IsCaptureRequested() && sampleCount == inputChannels * AX_SAMPLES_PER_3MS_48KHZ &&
+			inputChannels >= 2)
 		{
-			if (g_padAudio)
-				g_padAudio->FeedBlock(tempDRCChannelData);
-
-			tempDRCAudioBlockCounter = 0;
+			auto* output = tempDRCStreamData + tempDRCStreamBlockCounter * AX_SAMPLES_PER_3MS_48KHZ * 2;
+			for (sint32 i = 0; i < AX_SAMPLES_PER_3MS_48KHZ; ++i)
+			{
+				output[i * 2] = _swapEndianS16(sampleData[i * inputChannels]);
+				output[i * 2 + 1] = _swapEndianS16(sampleData[i * inputChannels + 1]);
+			}
+			streamBlockReady = ++tempDRCStreamBlockCounter == AX_FRAMES_PER_GROUP;
+			if (streamBlockReady)
+				tempDRCStreamBlockCounter = 0;
 		}
+		else
+			tempDRCStreamBlockCounter = 0;
+#endif
+		{
+			std::shared_lock lock(g_audioMutex);
+			const uint32 channels = g_padAudio ? g_padAudio->GetChannels() : AX_DRC_CHANNEL_COUNT;
+			sint16* outputChannel = tempDRCChannelData + AX_SAMPLES_PER_3MS_48KHZ * tempDRCAudioBlockCounter * channels;
+			for (sint32 i = 0; i < sampleCount; ++i)
+				outputChannel[i] = _swapEndianS16(sampleData[i]);
+
+			tempDRCAudioBlockCounter++;
+			if (tempDRCAudioBlockCounter == AX_FRAMES_PER_GROUP)
+			{
+				if (g_padAudio)
+					g_padAudio->FeedBlock(tempDRCChannelData);
+				tempDRCAudioBlockCounter = 0;
+			}
+		}
+#ifdef ENABLE_GSTREAMER_SRT
+		if (streamBlockReady)
+		{
+			constexpr uint64_t blockDurationNs = GamePadSrtStreamer::kAudioFramesPerBlock * 1000000000ull / 48000;
+			const auto nowNs = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+				std::chrono::steady_clock::now().time_since_epoch()).count());
+			streamer.SubmitAudio(tempDRCStreamData, GamePadSrtStreamer::kAudioFramesPerBlock, nowNs - blockDurationNs);
+		}
+#endif
 	}
 
 	void AXOut_SubmitDRCFrame(sint32 frameIndex)

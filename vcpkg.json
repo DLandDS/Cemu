@@ -71,7 +71,7 @@
   ],
   "features": {
     "srt-stream": {
-      "description": "Stream the GamePad video to an SRT receiver",
+      "description": "Stream GamePad video and audio to an SRT receiver",
       "dependencies": [
         {
           "name": "gstreamer",
@@ -80,7 +80,8 @@
             "plugins-base",
             "plugins-good",
             "srt",
-            "openh264"
+            "openh264",
+            "libav"
           ]
         }
       ]

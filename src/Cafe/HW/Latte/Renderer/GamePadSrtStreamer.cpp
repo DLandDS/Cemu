@@ -9,6 +9,7 @@
 #include <unordered_map>
 
 #ifdef ENABLE_GSTREAMER_SRT
+#include "audio/IAudioAPI.h"
 #include <gst/app/gstappsrc.h>
 #include <gst/gst.h>
 #ifdef CEMU_GST_DYNAMIC_PLUGINS
@@ -30,6 +31,14 @@ namespace
 		auto previous = maximum.load(std::memory_order_relaxed);
 		while (previous < value && !maximum.compare_exchange_weak(previous, value, std::memory_order_relaxed)) {}
 	}
+#ifdef ENABLE_GSTREAMER_SRT
+	void SetLocalGamePadVolume(bool mute)
+	{
+		std::unique_lock lock(g_audioMutex);
+		if (g_padAudio)
+			g_padAudio->SetVolume(mute ? 0 : g_padVolume.load(std::memory_order_relaxed));
+	}
+#endif
 }
 
 GamePadSrtStreamer& GamePadSrtStreamer::Instance()
@@ -177,18 +186,21 @@ bool GamePadSrtStreamer::Start(const std::string& uri, Encoder encoder, std::str
 		std::lock_guard lock(m_mutex);
 		m_error.clear();
 		m_frames.clear();
+		m_audioBlocks.clear();
+		m_audioDiscontinuity = true;
 	}
 	m_stop.store(false, std::memory_order_release);
 	m_connected.store(false, std::memory_order_release);
 	m_captureDrops.store(0, std::memory_order_relaxed);
 	m_captureFrames.store(0, std::memory_order_relaxed);
 	m_queueDrops.store(0, std::memory_order_relaxed);
+	m_audioQueueDrops.store(0, std::memory_order_relaxed);
 	m_readbackFrames.store(0, std::memory_order_relaxed);
 	m_readbackTotalNs.store(0, std::memory_order_relaxed);
 	m_readbackMaxNs.store(0, std::memory_order_relaxed);
 	m_generation.fetch_add(1, std::memory_order_acq_rel);
 	m_captureRequested.store(true, std::memory_order_release);
-	cemuLog_log(LogType::Force, "GamePad SRT: starting {}x{} RGBA -> H.264/MPEG-TS at srt://{}:{}, mode {}",
+	cemuLog_log(LogType::Force, "GamePad SRT: starting {}x{} RGBA + GamePad PCM -> H.264/AAC MPEG-TS at srt://{}:{}, mode {}",
 		kWidth, kHeight, authority.substr(0, colon), port,
 		mode);
 	try
@@ -210,14 +222,20 @@ void GamePadSrtStreamer::Stop()
 {
 	m_generation.fetch_add(1, std::memory_order_acq_rel);
 	m_captureRequested.store(false, std::memory_order_release);
-	m_connected.store(false, std::memory_order_release);
 	m_stop.store(true, std::memory_order_release);
+	[[maybe_unused]] const bool wasConnected = m_connected.exchange(false, std::memory_order_acq_rel);
 	m_wake.notify_all();
 	if (m_worker.joinable())
 		m_worker.join();
+#ifdef ENABLE_GSTREAMER_SRT
+	if (wasConnected)
+		SetLocalGamePadVolume(false);
+#endif
 	m_running.store(false, std::memory_order_release);
 	std::lock_guard lock(m_mutex);
 	m_frames.clear();
+	m_audioBlocks.clear();
+	m_audioDiscontinuity = true;
 	m_error.clear();
 }
 
@@ -236,11 +254,17 @@ void GamePadSrtStreamer::Fail(std::string error)
 		std::lock_guard lock(m_mutex);
 		m_error = std::move(error);
 		m_frames.clear();
+		m_audioBlocks.clear();
+		m_audioDiscontinuity = true;
 	}
 	m_captureRequested.store(false, std::memory_order_release);
 	m_running.store(false, std::memory_order_release);
-	m_connected.store(false, std::memory_order_release);
 	m_stop.store(true, std::memory_order_release);
+	[[maybe_unused]] const bool wasConnected = m_connected.exchange(false, std::memory_order_acq_rel);
+#ifdef ENABLE_GSTREAMER_SRT
+	if (wasConnected)
+		SetLocalGamePadVolume(false);
+#endif
 	m_wake.notify_all();
 }
 
@@ -260,6 +284,39 @@ void GamePadSrtStreamer::SubmitFrame(const uint8_t* rgba, size_t size, uint64_t 
 		m_queueDrops.fetch_add(m_frames.size(), std::memory_order_relaxed);
 		m_frames.clear();
 		m_frames.emplace_back(std::move(frame));
+	}
+	m_wake.notify_one();
+}
+
+void GamePadSrtStreamer::SubmitAudio(const int16_t* stereo, size_t frames, uint64_t firstSampleTimestampNs)
+{
+	if (!IsCaptureRequested() || !stereo || frames != kAudioFramesPerBlock)
+		return;
+	AudioBlock block;
+	std::copy_n(stereo, block.samples.size(), block.samples.begin());
+	block.timestampNs = firstSampleTimestampNs;
+	{
+		std::unique_lock lock(m_mutex, std::try_to_lock);
+		if (!lock.owns_lock())
+		{
+			m_audioQueueDrops.fetch_add(1, std::memory_order_relaxed);
+			m_audioDiscontinuity.store(true, std::memory_order_release);
+			return;
+		}
+		if (m_stop.load(std::memory_order_acquire))
+			return;
+		constexpr size_t maxBlocks = 4; // 48 ms of PCM, even if the encoder stalls.
+		if (m_audioBlocks.size() >= maxBlocks)
+		{
+			m_audioBlocks.pop_front();
+			m_audioQueueDrops.fetch_add(1, std::memory_order_relaxed);
+			if (!m_audioBlocks.empty())
+				m_audioBlocks.front().discontinuity = true;
+			else
+				m_audioDiscontinuity = true;
+		}
+		block.discontinuity = m_audioDiscontinuity.exchange(false, std::memory_order_acq_rel);
+		m_audioBlocks.emplace_back(std::move(block));
 	}
 	m_wake.notify_one();
 }
@@ -395,7 +452,8 @@ void GamePadSrtStreamer::Worker(std::string uri, Encoder requestedEncoder)
 		Fail("GStreamer could not initialize.");
 		return;
 	}
-	for (const char* name : {"appsrc", "videoconvert", "capsfilter", "h264parse", "mpegtsmux", "srtsink"})
+	for (const char* name : {"appsrc", "videoconvert", "audioconvert", "capsfilter", "h264parse",
+			"avenc_aac", "aacparse", "mpegtsmux", "srtsink"})
 	{
 		GstElementFactory* factory = gst_element_factory_find(name);
 		if (!factory)
@@ -428,8 +486,9 @@ void GamePadSrtStreamer::Worker(std::string uri, Encoder requestedEncoder)
 		}
 		gst_object_unref(encoderFactory);
 
-		const std::array<const char*, 7> names{
-			"appsrc", "videoconvert", "capsfilter", encoderName, "h264parse", "mpegtsmux", "srtsink"};
+		const std::array<const char*, 12> names{
+			"appsrc", "videoconvert", "capsfilter", encoderName, "h264parse", "mpegtsmux", "srtsink",
+			"appsrc", "audioconvert", "avenc_aac", "aacparse", "capsfilter"};
 		GstElement* pipeline = gst_pipeline_new("gamepad-srt");
 		std::array<GstElement*, names.size()> elements{};
 		bool created = pipeline != nullptr;
@@ -456,6 +515,8 @@ void GamePadSrtStreamer::Worker(std::string uri, Encoder requestedEncoder)
 		GstElement* source = elements[0];
 		GstElement* videoEncoder = elements[3];
 		GstElement* sink = elements[6];
+		GstElement* audioSource = elements[7];
+		GstElement* audioEncoder = elements[9];
 		g_object_set(source, "is-live", TRUE, "format", GST_FORMAT_TIME, "block", FALSE,
 			"emit-signals", FALSE, "max-buffers", guint64(1),
 			"max-bytes", guint64(kWidth) * kHeight * 4, nullptr);
@@ -483,12 +544,29 @@ void GamePadSrtStreamer::Worker(std::string uri, Encoder requestedEncoder)
 		g_object_set(elements[4], "config-interval", -1, nullptr);
 		g_object_set(elements[5], "alignment", 7, nullptr);
 		g_object_set(sink, "uri", uri.c_str(), "auto-reconnect", FALSE, "poll-timeout", 100, nullptr);
+		g_object_set(audioSource, "is-live", TRUE, "format", GST_FORMAT_TIME, "block", FALSE,
+			"emit-signals", FALSE, "max-buffers", guint64(4),
+			"max-time", guint64(48 * GST_MSECOND), nullptr);
+		gst_app_src_set_leaky_type(GST_APP_SRC(audioSource), GST_APP_LEAKY_TYPE_DOWNSTREAM);
+		GstCaps* audioSourceCaps = gst_caps_new_simple("audio/x-raw", "format", G_TYPE_STRING, "S16LE",
+			"layout", G_TYPE_STRING, "interleaved", "rate", G_TYPE_INT, 48000,
+			"channels", G_TYPE_INT, 2, nullptr);
+		gst_app_src_set_caps(GST_APP_SRC(audioSource), audioSourceCaps);
+		gst_caps_unref(audioSourceCaps);
+		g_object_set(audioEncoder, "bitrate", 128000, "aac-coder", 2, "threads", 1, nullptr);
+		GstCaps* adtsCaps = gst_caps_new_simple("audio/mpeg", "mpegversion", G_TYPE_INT, 4,
+			"stream-format", G_TYPE_STRING, "adts", nullptr);
+		g_object_set(elements[11], "caps", adtsCaps, nullptr);
+		gst_caps_unref(adtsCaps);
 
 		for (GstElement* element : elements)
 			gst_bin_add(GST_BIN(pipeline), element);
 		bool linked = true;
-		for (size_t i = 1; i < elements.size(); ++i)
+		for (size_t i = 1; i <= 6; ++i)
 			linked = gst_element_link(elements[i - 1], elements[i]) && linked;
+		for (size_t i = 8; i < elements.size(); ++i)
+			linked = gst_element_link(elements[i - 1], elements[i]) && linked;
+		linked = gst_element_link(elements[11], elements[5]) && linked;
 		if (!linked)
 		{
 			gst_element_set_state(pipeline, GST_STATE_NULL);
@@ -540,10 +618,20 @@ void GamePadSrtStreamer::Worker(std::string uri, Encoder requestedEncoder)
 		}
 
 		cemuLog_log(LogType::Force, "GamePad SRT: using {}", displayName);
+		constexpr uint64_t audioDurationNs = kAudioFramesPerBlock * GST_SECOND / 48000;
+		const uint64_t epochNs = SteadyNowNs();
+		timing.firstCaptureNs.store(epochNs, std::memory_order_release);
+		{
+			std::lock_guard lock(m_mutex);
+			m_audioBlocks.clear();
+			m_audioDiscontinuity = true;
+		}
 		m_running.store(true, std::memory_order_release);
-		uint64_t firstTimestamp = 0;
 		uint64_t lastPts = 0;
+		uint64_t nextAudioPts = 0;
+		bool haveAudioPts = false;
 		uint64_t staleDrops = 0;
+		uint64_t staleAudioDrops = 0;
 		uint64_t appsrcFullEvents = 0;
 		uint64_t lastReportNs = SteadyNowNs();
 		uint64_t lastCaptures = m_captureFrames.load(std::memory_order_relaxed);
@@ -575,6 +663,21 @@ void GamePadSrtStreamer::Worker(std::string uri, Encoder requestedEncoder)
 			}
 
 			const auto now = SteadyNowNs();
+			GstStructure* currentSrtStats = nullptr;
+			g_object_get(sink, "stats", &currentSrtStats, nullptr);
+			guint64 sentBytes = 0;
+			gint srtLatencyMs = 0;
+			gdouble srtRttMs = 0;
+			if (currentSrtStats)
+			{
+				gst_structure_get_uint64(currentSrtStats, "bytes-sent-total", &sentBytes);
+				gst_structure_get_int(currentSrtStats, "negotiated-latency-ms", &srtLatencyMs);
+				gst_structure_get_double(currentSrtStats, "rtt-ms", &srtRttMs);
+				gst_structure_free(currentSrtStats);
+			}
+			if (sentBytes > 0 && !m_stop.load(std::memory_order_acquire) &&
+				!m_connected.exchange(true, std::memory_order_acq_rel))
+				SetLocalGamePadVolume(true);
 			if (now - lastReportNs >= 5 * GST_SECOND)
 			{
 				uint64_t encodedFrames, encodeSamples, encodeTotalNs, encodeMaxNs;
@@ -594,26 +697,12 @@ void GamePadSrtStreamer::Worker(std::string uri, Encoder requestedEncoder)
 					srtInputTotalNs = timing.srtInputTotalNs;
 					srtInputMaxNs = timing.srtInputMaxNs;
 				}
-				GstStructure* srtStats = nullptr;
-				g_object_get(sink, "stats", &srtStats, nullptr);
-				guint64 sentBytes = 0;
-				gint srtLatencyMs = 0;
-				gdouble srtRttMs = 0;
-				if (srtStats)
-				{
-					gst_structure_get_uint64(srtStats, "bytes-sent-total", &sentBytes);
-					gst_structure_get_int(srtStats, "negotiated-latency-ms", &srtLatencyMs);
-					gst_structure_get_double(srtStats, "rtt-ms", &srtRttMs);
-					gst_structure_free(srtStats);
-				}
-				if (sentBytes > 0)
-					m_connected.store(true, std::memory_order_release);
 				const auto readbacks = m_readbackFrames.load(std::memory_order_relaxed);
 				const auto captures = m_captureFrames.load(std::memory_order_relaxed);
 				const double seconds = double(now - lastReportNs) / double(GST_SECOND);
 				const auto readbackTotalNs = m_readbackTotalNs.load(std::memory_order_relaxed);
 				cemuLog_log(LogType::Force,
-					"GamePad SRT stats ({}): capture {:.1f} fps, encoded {:.1f} fps, readback avg {:.1f}/max {:.1f} ms, encode avg {:.1f}/max {:.1f} ms, encoded age avg {:.1f}/max {:.1f} ms, SRT input avg {:.1f}/max {:.1f} ms ({} buffers), SRT latency {} ms RTT {:.1f} ms, sent {:.1f} Mbit/s, dropped GPU {} queue {} stale {}, appsrc full {}",
+					"GamePad SRT stats ({}): capture {:.1f} fps, encoded {:.1f} fps, readback avg {:.1f}/max {:.1f} ms, encode avg {:.1f}/max {:.1f} ms, encoded age avg {:.1f}/max {:.1f} ms, SRT input avg {:.1f}/max {:.1f} ms ({} buffers), SRT latency {} ms RTT {:.1f} ms, sent {:.1f} Mbit/s, dropped GPU {} queue {} stale {}, appsrc full {}, audio queue {} stale {}",
 					displayName, double(captures - lastCaptures) / seconds,
 					double(encodedFrames - lastEncodedFrames) / seconds,
 					readbacks ? double(readbackTotalNs) / readbacks / 1e6 : 0.0,
@@ -626,7 +715,8 @@ void GamePadSrtStreamer::Worker(std::string uri, Encoder requestedEncoder)
 					double(srtInputMaxNs) / 1e6, srtInputBuffers, srtLatencyMs, srtRttMs,
 					double(sentBytes - lastSentBytes) * 8.0 / seconds / 1e6,
 					m_captureDrops.load(std::memory_order_relaxed),
-					m_queueDrops.load(std::memory_order_relaxed), staleDrops, appsrcFullEvents);
+					m_queueDrops.load(std::memory_order_relaxed), staleDrops, appsrcFullEvents,
+					m_audioQueueDrops.load(std::memory_order_relaxed), staleAudioDrops);
 				lastReportNs = now;
 				lastCaptures = captures;
 				lastEncodedFrames = encodedFrames;
@@ -634,29 +724,96 @@ void GamePadSrtStreamer::Worker(std::string uri, Encoder requestedEncoder)
 			}
 
 			Frame frame;
+			AudioBlock audio;
+			bool haveFrame = false;
+			bool haveAudio = false;
 			{
 				std::unique_lock lock(m_mutex);
-				m_wake.wait_for(lock, std::chrono::milliseconds(20),
-					[this] { return m_stop.load() || !m_frames.empty(); });
+				const auto audioDeadline = std::chrono::steady_clock::time_point(
+					std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+						std::chrono::nanoseconds(epochNs + nextAudioPts + audioDurationNs + 2 * GST_MSECOND)));
+				m_wake.wait_until(lock, audioDeadline,
+					[this] { return m_stop.load() || !m_frames.empty() || !m_audioBlocks.empty(); });
 				if (m_stop.load())
 					break;
-				if (m_frames.empty())
-					continue;
-				frame = std::move(m_frames.back());
-				m_frames.clear();
+				if (!m_audioBlocks.empty())
+				{
+					audio = std::move(m_audioBlocks.front());
+					m_audioBlocks.pop_front();
+					haveAudio = true;
+				}
+				if (!m_frames.empty())
+				{
+					frame = std::move(m_frames.back());
+					m_frames.clear();
+					haveFrame = true;
+				}
 			}
-			if (SteadyNowNs() - frame.timestampNs > 150 * GST_MSECOND)
+			if (!haveAudio && SteadyNowNs() >= epochNs + nextAudioPts + audioDurationNs + 2 * GST_MSECOND)
+			{
+				const uint64_t nowNs = SteadyNowNs();
+				if (nowNs > epochNs + nextAudioPts + 50 * GST_MSECOND)
+				{
+					nextAudioPts = nowNs - epochNs - audioDurationNs;
+					haveAudioPts = false;
+				}
+				audio.timestampNs = epochNs + nextAudioPts;
+				audio.discontinuity = !haveAudioPts;
+				haveAudio = true; // Keep MPEG-TS video moving when no GamePad PCM is produced.
+			}
+			if (haveAudio)
+			{
+				if (audio.timestampNs < epochNs || SteadyNowNs() - audio.timestampNs > 100 * GST_MSECOND)
+				{
+					++staleAudioDrops;
+					haveAudioPts = false;
+				}
+				else
+				{
+					uint64_t pts = audio.timestampNs - epochNs;
+					bool discontinuity = audio.discontinuity || !haveAudioPts;
+					if (haveAudioPts)
+					{
+						const uint64_t jitterNs = pts >= nextAudioPts ? pts - nextAudioPts : nextAudioPts - pts;
+						if (jitterNs <= 4 * GST_MSECOND)
+							pts = nextAudioPts;
+						else
+						{
+							discontinuity = true;
+							pts = std::max(pts, nextAudioPts);
+						}
+					}
+					GstBuffer* buffer = gst_buffer_new_allocate(nullptr, sizeof(audio.samples), nullptr);
+					if (!buffer)
+					{
+						failure = "GStreamer could not allocate an audio buffer.";
+						break;
+					}
+					gst_buffer_fill(buffer, 0, audio.samples.data(), sizeof(audio.samples));
+					GST_BUFFER_PTS(buffer) = pts;
+					GST_BUFFER_DTS(buffer) = GST_CLOCK_TIME_NONE;
+					GST_BUFFER_DURATION(buffer) = audioDurationNs;
+					if (gst_app_src_get_current_level_buffers(GST_APP_SRC(audioSource)) >= 4)
+						discontinuity = true;
+					if (discontinuity)
+						GST_BUFFER_FLAG_SET(buffer, GST_BUFFER_FLAG_DISCONT);
+					if (gst_app_src_push_buffer(GST_APP_SRC(audioSource), buffer) != GST_FLOW_OK)
+					{
+						failure = "GStreamer could not accept GamePad audio.";
+						break;
+					}
+					nextAudioPts = pts + audioDurationNs;
+					haveAudioPts = true;
+				}
+			}
+			if (!haveFrame)
+				continue;
+			if (frame.timestampNs < epochNs || SteadyNowNs() - frame.timestampNs > 150 * GST_MSECOND)
 			{
 				++staleDrops;
 				continue;
 			}
-			if (!firstTimestamp)
-			{
-				firstTimestamp = frame.timestampNs;
-				timing.firstCaptureNs.store(firstTimestamp, std::memory_order_release);
-			}
-			uint64_t pts = frame.timestampNs >= firstTimestamp ?
-				frame.timestampNs - firstTimestamp : lastPts + 1;
+			uint64_t pts = frame.timestampNs - epochNs;
 			pts = std::max(pts, lastPts + 1);
 			lastPts = pts;
 			GstBuffer* buffer = gst_buffer_new_allocate(nullptr, frame.pixels.size(), nullptr);
@@ -685,6 +842,8 @@ void GamePadSrtStreamer::Worker(std::string uri, Encoder requestedEncoder)
 				break;
 			}
 		}
+		if (m_connected.exchange(false, std::memory_order_acq_rel))
+			SetLocalGamePadVolume(false);
 		m_running.store(false, std::memory_order_release);
 		releasePipeline();
 		if (m_stop.load(std::memory_order_acquire))

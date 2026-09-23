@@ -17,6 +17,11 @@
           "name": "VCPKG_MANIFEST_INSTALL",
           "value": "True",
           "type": "BOOL"
+        },
+        {
+          "name": "BUILD_GSTREAMER_SRT_SMOKE_TEST",
+          "value": "True",
+          "type": "BOOL"
         }
       ]
     },
