@@ -43,7 +43,7 @@ InputAPIAddWindow::InputAPIAddWindow(wxWindow* parent, const wxPoint& position,
 				continue;
 
 			const auto provider = *p.begin();
-			m_input_api->Append(wxString::FromUTF8(provider->api_name()), new wxTypeData(provider->api()));
+			m_input_api->Append(wxString::FromUTF8(InputAPI::display_name(provider->api())), new wxTypeData(provider->api()));
 		}
 
 		m_input_api->Bind(wxEVT_CHOICE, &InputAPIAddWindow::on_api_selected, this);

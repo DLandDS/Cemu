@@ -15,6 +15,11 @@ add_library(CemuInput
 	api/DSU/DSUControllerProvider.h
 	api/DSU/DSUMessages.h
 	api/DSU/DSUMessages.cpp
+	api/RemoteGamePad/RemoteGamePadProtocol.h
+	api/RemoteGamePad/RemoteGamePadProvider.h
+	api/RemoteGamePad/RemoteGamePadProvider.cpp
+	api/RemoteGamePad/RemoteGamePadController.h
+	api/RemoteGamePad/RemoteGamePadController.cpp
 	api/Keyboard/KeyboardControllerProvider.h
 	api/Keyboard/KeyboardControllerProvider.cpp
 	api/Keyboard/KeyboardController.cpp

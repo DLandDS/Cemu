@@ -7,6 +7,7 @@
 
 #include "input/api/Keyboard/KeyboardController.h"
 #include "input/api/DSU/DSUController.h"
+#include "input/api/RemoteGamePad/RemoteGamePadController.h"
 #include "input/api/GameCube/GameCubeController.h"
 
 #if BOOST_OS_WINDOWS
@@ -27,6 +28,10 @@ ControllerPtr ControllerFactory::CreateController(InputAPI::Type api, std::strin
 {
 	switch (api)
 	{
+	case InputAPI::RemoteGamePad:
+		if (uuid != "remote-gamepad-v1")
+			throw std::invalid_argument("invalid Remote GamePad device ID");
+		return std::make_shared<RemoteGamePadController>();
 #if HAS_KEYBOARD
 	case InputAPI::Keyboard:
 		return std::make_shared<KeyboardController>();
@@ -136,6 +141,8 @@ ControllerProviderPtr ControllerFactory::CreateControllerProvider(InputAPI::Type
 {
 	switch (api)
 	{
+	case InputAPI::RemoteGamePad:
+		return std::make_shared<RemoteGamePadProvider>();
 #if HAS_KEYBOARD
 	case InputAPI::Keyboard:
 		return std::make_shared<KeyboardControllerProvider>();

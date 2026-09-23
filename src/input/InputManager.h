@@ -15,6 +15,7 @@
 
 #include "input/api/Keyboard/KeyboardControllerProvider.h"
 #include "input/api/DSU/DSUControllerProvider.h"
+#include "input/api/RemoteGamePad/RemoteGamePadProvider.h"
 #include "input/api/GameCube/GameCubeControllerProvider.h"
 
 #include "input/emulated/VPADController.h"
@@ -63,6 +64,7 @@ public:
 	
 	ControllerProviderPtr get_api_provider(std::string_view api_name) const;
 	ControllerProviderPtr get_api_provider(InputAPI::Type api) const;
+	std::shared_ptr<RemoteGamePadProvider> get_remote_gamepad_provider() const;
 	// will create the provider with the given settings if it doesn't exist yet
 	ControllerProviderPtr get_api_provider(InputAPI::Type api, const ControllerProviderSettings& settings);
 

@@ -43,6 +43,8 @@ DefaultControllerSettings::DefaultControllerSettings(wxWindow* parent, const wxP
 		const auto rumble = (int)(m_settings.rumble * 100);
 		rumbleSizer->Add(new wxStaticText(box, wxID_ANY, _("Rumble")), 0, wxALL | wxALIGN_CENTER_VERTICAL, 5);
 		m_rumble = new wxSlider(box, wxID_ANY, rumble, 0, 100);
+		if (m_controller->api() == InputAPI::RemoteGamePad)
+			m_rumble->Disable();
 		rumbleSizer->Add(m_rumble, 1, wxALL | wxEXPAND, 5);
 
 		const auto text = new wxStaticText(box, wxID_ANY, wxString::Format("%d%%", rumble));
@@ -50,6 +52,9 @@ DefaultControllerSettings::DefaultControllerSettings(wxWindow* parent, const wxP
 		m_rumble->Bind(wxEVT_SLIDER, &DefaultControllerSettings::on_rumble_change, this, wxID_ANY, wxID_ANY, new wxControlObject(text));
 
 		box_sizer->Add(rumbleSizer);
+		if (m_controller->api() == InputAPI::RemoteGamePad)
+			box_sizer->Add(new wxStaticText(box, wxID_ANY, _("Set vibration intensity in the Android app.")),
+				0, wxLEFT | wxRIGHT | wxBOTTOM, 5);
 
 		sizer->Add(box_sizer, 1, wxALL|wxEXPAND, 5);
 	}

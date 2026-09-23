@@ -13,6 +13,7 @@
 #include "wxgui/components/wxGameList.h"
 
 #include <future>
+#include <chrono>
 #include "Cafe/HW/Espresso/Debugger/GDBStub.h"
 #include "Cafe/CafeSystem.h"
 
@@ -155,6 +156,8 @@ private:
 	bool InstallUpdate(const fs::path& metaFilePath);
 
 	void OnTimer(wxTimerEvent& event);
+	void TryStartRemoteGamePadVideo();
+	void ShowRemoteGamePadError(std::string_view path, std::string_view error);
 
 	// CafeSystem implementation
 	void CafeRecreateCanvas() override;
@@ -227,6 +230,8 @@ private:
 	wxMenuItem* m_fullscreenMenuItem{};
 	wxMenuItem* m_padViewMenuItem{};
 	wxMenuItem* m_srtStreamMenuItem{};
+	std::chrono::steady_clock::time_point m_nextVideoRetry{};
+	bool m_videoErrorReported = false;
 
 	// tools
 	wxMenuItem* m_memorySearcherMenuItem{};

@@ -6,6 +6,7 @@
 #include <deque>
 #include <mutex>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -20,10 +21,12 @@ public:
 	static constexpr uint32_t kHeight = 480;
 	static GamePadSrtStreamer& Instance();
 
+	static bool ValidateCallerUri(std::string_view uri, std::string& error);
 	bool Start(const std::string& uri, Encoder encoder, std::string& error);
 	void Stop();
 	bool IsCaptureRequested() const { return m_captureRequested.load(std::memory_order_acquire); }
 	bool IsRunning() const { return m_running.load(std::memory_order_acquire); }
+	bool IsConnected() const { return m_connected.load(std::memory_order_acquire); }
 	uint64_t Generation() const { return m_generation.load(std::memory_order_acquire); }
 	std::string TakeError();
 	void SubmitFrame(const uint8_t* rgba, size_t size, uint64_t captureTimestampNs);
@@ -47,6 +50,7 @@ private:
 	};
 	std::atomic_bool m_captureRequested{false};
 	std::atomic_bool m_running{false};
+	std::atomic_bool m_connected{false};
 	std::atomic_bool m_stop{false};
 	std::atomic_uint64_t m_generation{0};
 	std::mutex m_mutex;

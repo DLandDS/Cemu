@@ -43,8 +43,76 @@ GamePadSrtStreamer::~GamePadSrtStreamer()
 	Stop();
 }
 
+bool GamePadSrtStreamer::ValidateCallerUri(std::string_view uri, std::string& error)
+{
+	constexpr std::string_view message = "Video URL must be an SRT caller destination with a host and port.";
+	if (!uri.starts_with("srt://") || uri.find_first_of(" \t\r\n") != std::string_view::npos)
+	{
+		error = message;
+		return false;
+	}
+	const auto authorityEnd = uri.find_first_of("/?", 6);
+	const auto authority = uri.substr(6, authorityEnd == std::string_view::npos ?
+		std::string_view::npos : authorityEnd - 6);
+	const auto colon = authority.rfind(':');
+	if (colon == std::string_view::npos || colon == 0 || authority.find('@') != std::string_view::npos)
+	{
+		error = message;
+		return false;
+	}
+	const auto host = authority.substr(0, colon);
+	if (host == "0.0.0.0" || host == "[::]" || host.empty() ||
+		(host.starts_with('[') != host.ends_with(']')))
+	{
+		error = message;
+		return false;
+	}
+	uint32_t port = 0;
+	const auto portText = authority.substr(colon + 1);
+	if (portText.empty() || portText.size() > 5)
+	{
+		error = message;
+		return false;
+	}
+	for (char digit : portText)
+	{
+		if (digit < '0' || digit > '9')
+		{
+			error = message;
+			return false;
+		}
+		port = port * 10 + uint32_t(digit - '0');
+	}
+	if (!port || port > 65535 || authorityEnd == std::string_view::npos || uri[authorityEnd] != '?')
+	{
+		error = message;
+		return false;
+	}
+	bool caller = false;
+	for (size_t start = authorityEnd + 1; start < uri.size(); )
+	{
+		const auto end = uri.find('&', start);
+		const auto option = uri.substr(start, end == std::string_view::npos ? end : end - start);
+		if (option.starts_with("mode="))
+		{
+			if (caller || option != "mode=caller")
+			{
+				error = message;
+				return false;
+			}
+			caller = true;
+		}
+		if (end == std::string_view::npos) break;
+		start = end + 1;
+	}
+	if (!caller) error = message;
+	return caller;
+}
+
 bool GamePadSrtStreamer::Start(const std::string& uri, Encoder encoder, std::string& error)
 {
+	if (!ValidateCallerUri(uri, error))
+		return false;
 #ifndef ENABLE_GSTREAMER_SRT
 	(void)encoder;
 	error = "This Cemu build does not include GStreamer SRT support.";
@@ -111,6 +179,7 @@ bool GamePadSrtStreamer::Start(const std::string& uri, Encoder encoder, std::str
 		m_frames.clear();
 	}
 	m_stop.store(false, std::memory_order_release);
+	m_connected.store(false, std::memory_order_release);
 	m_captureDrops.store(0, std::memory_order_relaxed);
 	m_captureFrames.store(0, std::memory_order_relaxed);
 	m_queueDrops.store(0, std::memory_order_relaxed);
@@ -141,6 +210,7 @@ void GamePadSrtStreamer::Stop()
 {
 	m_generation.fetch_add(1, std::memory_order_acq_rel);
 	m_captureRequested.store(false, std::memory_order_release);
+	m_connected.store(false, std::memory_order_release);
 	m_stop.store(true, std::memory_order_release);
 	m_wake.notify_all();
 	if (m_worker.joinable())
@@ -169,6 +239,7 @@ void GamePadSrtStreamer::Fail(std::string error)
 	}
 	m_captureRequested.store(false, std::memory_order_release);
 	m_running.store(false, std::memory_order_release);
+	m_connected.store(false, std::memory_order_release);
 	m_stop.store(true, std::memory_order_release);
 	m_wake.notify_all();
 }
@@ -535,6 +606,8 @@ void GamePadSrtStreamer::Worker(std::string uri, Encoder requestedEncoder)
 					gst_structure_get_double(srtStats, "rtt-ms", &srtRttMs);
 					gst_structure_free(srtStats);
 				}
+				if (sentBytes > 0)
+					m_connected.store(true, std::memory_order_release);
 				const auto readbacks = m_readbackFrames.load(std::memory_order_relaxed);
 				const auto captures = m_captureFrames.load(std::memory_order_relaxed);
 				const double seconds = double(now - lastReportNs) / double(GST_SECOND);

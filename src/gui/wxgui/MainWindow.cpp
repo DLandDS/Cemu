@@ -449,6 +449,7 @@ wxString MainWindow::GetInitialWindowTitle()
 void MainWindow::OnClose(wxCloseEvent& event)
 {
 	GamePadSrtStreamer::Instance().Stop();
+	InputManager::instance().get_remote_gamepad_provider()->Stop();
 	if (m_debugger_window)
 	{
 		m_debugger_window->CleanupForDestroy();
@@ -916,11 +917,16 @@ void MainWindow::OnOptionsInput(wxCommandEvent& event)
 	}
 	case MAINFRAME_MENU_ID_OPTIONS_SRT_STREAM_SETTINGS:
 	{
-		wxDialog dialog(this, wxID_ANY, _("SRT stream settings"));
+		wxDialog dialog(this, wxID_ANY, _("Remote GamePad Settings"));
 		auto* layout = new wxBoxSizer(wxVERTICAL);
 		auto* fields = new wxFlexGridSizer(2, 8, 8);
 		fields->AddGrowableCol(1);
-		fields->Add(new wxStaticText(&dialog, wxID_ANY, _("SRT receiver URI:")), 0, wxALIGN_CENTER_VERTICAL);
+		fields->Add(new wxStaticText(&dialog, wxID_ANY, _("Input server:")), 0, wxALIGN_CENTER_VERTICAL);
+		auto* inputServer = new wxTextCtrl(&dialog, wxID_ANY,
+			wxString::FromUTF8(GetWxGUIConfig().remote_gamepad_input_server.GetValue()));
+		inputServer->SetMinSize(wxSize(420, -1));
+		fields->Add(inputServer, 1, wxEXPAND);
+		fields->Add(new wxStaticText(&dialog, wxID_ANY, _("Video URL:")), 0, wxALIGN_CENTER_VERTICAL);
 		auto* uri = new wxTextCtrl(&dialog, wxID_ANY,
 			wxString::FromUTF8(GetWxGUIConfig().stream_gamepad_srt_uri.GetValue()));
 		uri->SetMinSize(wxSize(420, -1));
@@ -937,42 +943,69 @@ void MainWindow::OnOptionsInput(wxCommandEvent& event)
 		layout->Add(dialog.CreateButtonSizer(wxOK | wxCANCEL), 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 10);
 		dialog.SetSizerAndFit(layout);
 		dialog.CentreOnParent();
-		if (dialog.ShowModal() == wxID_OK)
+		while (dialog.ShowModal() == wxID_OK)
 		{
-			GetWxGUIConfig().stream_gamepad_srt_uri = uri->GetValue().ToStdString();
-			GetWxGUIConfig().stream_gamepad_srt_encoder =
+			const auto newInput = inputServer->GetValue().ToStdString();
+			const auto newUri = uri->GetValue().ToStdString();
+			std::string host, port, error;
+			if (!newInput.empty() && !RemoteGamePadProvider::ParseEndpoint(newInput, host, port))
+			{
+				ShowRemoteGamePadError("Input", "Enter a destination host and port, for example 192.168.1.42:9701.");
+				continue;
+			}
+			if (!newUri.empty() && !GamePadSrtStreamer::ValidateCallerUri(newUri, error))
+			{
+				ShowRemoteGamePadError("Video", error);
+				continue;
+			}
+			const auto newEncoder =
 				encoder->GetSelection() == 1 ? "qsv" : encoder->GetSelection() == 2 ? "openh264" : "auto";
+			const bool inputChanged = newInput != GetWxGUIConfig().remote_gamepad_input_server.GetValue();
+			const bool videoChanged = newUri != GetWxGUIConfig().stream_gamepad_srt_uri.GetValue() ||
+				newEncoder != GetWxGUIConfig().stream_gamepad_srt_encoder.GetValue();
+			GetWxGUIConfig().remote_gamepad_input_server = newInput;
+			GetWxGUIConfig().stream_gamepad_srt_uri = newUri;
+			GetWxGUIConfig().stream_gamepad_srt_encoder = newEncoder;
 			g_wxConfig.Save();
+			if (GetWxGUIConfig().remote_gamepad_enabled)
+			{
+				if (inputChanged)
+				{
+					auto provider = InputManager::instance().get_remote_gamepad_provider();
+					provider->Stop();
+					if (!provider->Start(newInput, error))
+						ShowRemoteGamePadError("Input", error);
+				}
+				if (videoChanged)
+				{
+					GamePadSrtStreamer::Instance().Stop();
+					m_videoErrorReported = false;
+					m_nextVideoRetry = {};
+					TryStartRemoteGamePadVideo();
+				}
+			}
+			break;
 		}
 		break;
 	}
 	case MAINFRAME_MENU_ID_OPTIONS_STREAM_GAMEPAD_SRT:
 	{
-		auto& streamer = GamePadSrtStreamer::Instance();
 		if (!m_srtStreamMenuItem->IsChecked())
 		{
-			streamer.Stop();
-			GetWxGUIConfig().stream_gamepad_srt_enabled = false;
+			GetWxGUIConfig().remote_gamepad_enabled = false;
+			GamePadSrtStreamer::Instance().Stop();
+			InputManager::instance().get_remote_gamepad_provider()->Stop();
+			m_videoErrorReported = false;
 			break;
 		}
-		if (ActiveSettings::GetGraphicsAPI() != kVulkan)
-		{
-			m_srtStreamMenuItem->Check(false);
-			wxMessageBox(_("GamePad SRT streaming requires the Vulkan graphics backend."),
-				_("GamePad SRT stream"), wxOK | wxICON_ERROR, this);
-			break;
-		}
+		GetWxGUIConfig().remote_gamepad_enabled = true;
+		m_videoErrorReported = false;
+		m_nextVideoRetry = {};
 		std::string error;
-		const auto& encoderId = GetWxGUIConfig().stream_gamepad_srt_encoder.GetValue();
-		const auto selectedEncoder = encoderId == "qsv" ? GamePadSrtStreamer::Encoder::QuickSync :
-			encoderId == "openh264" ? GamePadSrtStreamer::Encoder::OpenH264 : GamePadSrtStreamer::Encoder::Auto;
-		if (!streamer.Start(GetWxGUIConfig().stream_gamepad_srt_uri, selectedEncoder, error))
-		{
-			m_srtStreamMenuItem->Check(false);
-			wxMessageBox(wxString::FromUTF8(error), _("GamePad SRT stream"), wxOK | wxICON_ERROR, this);
-			break;
-		}
-		GetWxGUIConfig().stream_gamepad_srt_enabled = true;
+		if (!InputManager::instance().get_remote_gamepad_provider()->Start(
+			GetWxGUIConfig().remote_gamepad_input_server.GetValue(), error))
+			ShowRemoteGamePadError("Input", error);
+		TryStartRemoteGamePadVideo();
 		break;
 	}
 	case MAINFRAME_MENU_ID_OPTIONS_GRAPHIC_PACKS2:
@@ -1846,7 +1879,9 @@ void MainWindow::SetFullScreen(bool state)
 void MainWindow::EndEmulation() // unfinished - memory leaks and crashes after repeated use (after 3x usually)
 {
 	GamePadSrtStreamer::Instance().Stop();
-	GetWxGUIConfig().stream_gamepad_srt_enabled = false;
+	m_videoErrorReported = false;
+	m_nextVideoRetry = {};
+	InputManager::instance().get_remote_gamepad_provider()->SetRumble(false);
 	CafeSystem::ShutdownTitle();
 	DestroyCanvas();
 	m_game_launched = false;
@@ -1926,15 +1961,72 @@ bool MainWindow::IsMenuHidden() const
 	return m_menu_visible;
 }
 
+void MainWindow::ShowRemoteGamePadError(std::string_view path, std::string_view error)
+{
+	wxMessageBox(wxString::FromUTF8(fmt::format("{}: {}", path, error)),
+		_("Remote GamePad"), wxOK | wxICON_ERROR, this);
+}
+
+void MainWindow::TryStartRemoteGamePadVideo()
+{
+	if (!GetWxGUIConfig().remote_gamepad_enabled || GamePadSrtStreamer::Instance().IsCaptureRequested())
+		return;
+	std::string error;
+	const auto& uri = GetWxGUIConfig().stream_gamepad_srt_uri.GetValue();
+	if (ActiveSettings::GetGraphicsAPI() != kVulkan)
+		error = "GamePad video requires the Vulkan graphics backend.";
+	else
+		GamePadSrtStreamer::ValidateCallerUri(uri, error);
+#ifndef ENABLE_GSTREAMER_SRT
+	if (error.empty())
+		error = "This Cemu build does not include GStreamer SRT support.";
+#endif
+	if (error.empty() && !CafeSystem::IsTitleRunning())
+		return;
+	if (error.empty())
+	{
+		const auto& encoderId = GetWxGUIConfig().stream_gamepad_srt_encoder.GetValue();
+		const auto selectedEncoder = encoderId == "qsv" ? GamePadSrtStreamer::Encoder::QuickSync :
+			encoderId == "openh264" ? GamePadSrtStreamer::Encoder::OpenH264 : GamePadSrtStreamer::Encoder::Auto;
+		if (GamePadSrtStreamer::Instance().Start(uri, selectedEncoder, error))
+		{
+			m_nextVideoRetry = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+			return;
+		}
+	}
+	m_nextVideoRetry = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+	if (!m_videoErrorReported)
+	{
+		ShowRemoteGamePadError("Video", error);
+		m_videoErrorReported = true;
+	}
+}
+
 void MainWindow::OnTimer(wxTimerEvent& event)
 {
 	if (auto error = GamePadSrtStreamer::Instance().TakeError(); !error.empty())
 	{
 		GamePadSrtStreamer::Instance().Stop();
-		GetWxGUIConfig().stream_gamepad_srt_enabled = false;
-		if (m_srtStreamMenuItem)
-			m_srtStreamMenuItem->Check(false);
-		wxMessageBox(wxString::FromUTF8(error), _("GamePad SRT stream"), wxOK | wxICON_ERROR, this);
+		m_nextVideoRetry = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+		if (GetWxGUIConfig().remote_gamepad_enabled && !m_videoErrorReported)
+		{
+			ShowRemoteGamePadError("Video", error);
+			m_videoErrorReported = true;
+		}
+	}
+	if (GetWxGUIConfig().remote_gamepad_enabled)
+	{
+		if (auto error = InputManager::instance().get_remote_gamepad_provider()->TakeError(); !error.empty())
+			ShowRemoteGamePadError("Input", error);
+		if (GamePadSrtStreamer::Instance().IsConnected())
+			m_videoErrorReported = false;
+		if (!CafeSystem::IsTitleRunning())
+		{
+			if (GamePadSrtStreamer::Instance().IsCaptureRequested())
+				GamePadSrtStreamer::Instance().Stop();
+		}
+		else if (std::chrono::steady_clock::now() >= m_nextVideoRetry)
+			TryStartRemoteGamePadVideo();
 	}
 	if(m_update_available.valid() && future_is_ready(m_update_available))
 	{
@@ -2311,7 +2403,6 @@ void MainWindow::RecreateMenu()
 	if (GamePadSrtStreamer::Instance().IsCaptureRequested() && ActiveSettings::GetGraphicsAPI() != kVulkan)
 	{
 		GamePadSrtStreamer::Instance().Stop();
-		wxConfig.stream_gamepad_srt_enabled = false;
 	}
 	// options->console language submenu
 	wxMenu* optionsConsoleLanguageMenu = new wxMenu();
@@ -2344,21 +2435,9 @@ void MainWindow::RecreateMenu()
 	optionsMenu->Append(MAINFRAME_MENU_ID_OPTIONS_GRAPHIC_PACKS2, _("&Graphic packs"));
 	m_padViewMenuItem = optionsMenu->AppendCheckItem(MAINFRAME_MENU_ID_OPTIONS_SECOND_WINDOW_PADVIEW, _("&Separate GamePad view"));
 	m_padViewMenuItem->Check(wxConfig.pad_open);
-	m_srtStreamMenuItem = optionsMenu->AppendCheckItem(MAINFRAME_MENU_ID_OPTIONS_STREAM_GAMEPAD_SRT, _("Stream GamePad to SRT"));
-	m_srtStreamMenuItem->Check(GamePadSrtStreamer::Instance().IsCaptureRequested());
-	optionsMenu->Append(MAINFRAME_MENU_ID_OPTIONS_SRT_STREAM_SETTINGS, _("SRT stream settings..."));
-#if !defined(ENABLE_GSTREAMER_SRT) || !defined(ENABLE_VULKAN)
-	m_srtStreamMenuItem->Enable(false);
-	m_srtStreamMenuItem->SetItemLabel(_("Stream GamePad to SRT (unavailable in this build)"));
-	m_srtStreamMenuItem->SetHelp(_("This build does not include Vulkan and GStreamer SRT streaming."));
-#else
-	if (ActiveSettings::GetGraphicsAPI() != kVulkan)
-	{
-		m_srtStreamMenuItem->Enable(false);
-		m_srtStreamMenuItem->SetItemLabel(_("Stream GamePad to SRT (requires Vulkan)"));
-		m_srtStreamMenuItem->SetHelp(_("GamePad SRT streaming requires the Vulkan graphics backend."));
-	}
-#endif
+	m_srtStreamMenuItem = optionsMenu->AppendCheckItem(MAINFRAME_MENU_ID_OPTIONS_STREAM_GAMEPAD_SRT, _("Enable Remote GamePad"));
+	m_srtStreamMenuItem->Check(wxConfig.remote_gamepad_enabled);
+	optionsMenu->Append(MAINFRAME_MENU_ID_OPTIONS_SRT_STREAM_SETTINGS, _("Remote GamePad Settings..."));
 	optionsMenu->AppendSeparator();
 	#if BOOST_OS_MACOS
 	optionsMenu->Append(MAINFRAME_MENU_ID_OPTIONS_MAC_SETTINGS, _("&Settings..." "\tCtrl-,"));

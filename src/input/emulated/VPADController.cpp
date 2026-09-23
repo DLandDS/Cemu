@@ -513,6 +513,24 @@ bool VPADController::set_default_mapping(const std::shared_ptr<ControllerBase>& 
 	std::vector<std::pair<uint64, uint64>> mapping;
 	switch (controller->api())
 	{
+	case InputAPI::RemoteGamePad:
+		mapping = {
+			{kButtonId_A, kButton0}, {kButtonId_B, kButton1},
+			{kButtonId_X, kButton2}, {kButtonId_Y, kButton3},
+			{kButtonId_L, kButton4}, {kButtonId_R, kButton5},
+			{kButtonId_ZL, kButton6}, {kButtonId_ZR, kButton7},
+			{kButtonId_Plus, kButton8}, {kButtonId_Minus, kButton9},
+			{kButtonId_Home, kButton10},
+			{kButtonId_Up, kButton11}, {kButtonId_Right, kButton12},
+			{kButtonId_Down, kButton13}, {kButtonId_Left, kButton14},
+			{kButtonId_StickL, kButton15}, {kButtonId_StickR, kButton16},
+			{kButtonId_Screen, kButton17}, {kButtonId_Mic, kButton18},
+			{kButtonId_StickL_Up, kAxisYP}, {kButtonId_StickL_Down, kAxisYN},
+			{kButtonId_StickL_Left, kAxisXN}, {kButtonId_StickL_Right, kAxisXP},
+			{kButtonId_StickR_Up, kRotationYP}, {kButtonId_StickR_Down, kRotationYN},
+			{kButtonId_StickR_Left, kRotationXN}, {kButtonId_StickR_Right, kRotationXP},
+		};
+		break;
 #ifdef HAS_SDL
 	case InputAPI::SDLController: {
 		const auto sdl_controller = std::static_pointer_cast<SDLController>(controller);

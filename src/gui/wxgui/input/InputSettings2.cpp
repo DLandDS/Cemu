@@ -363,7 +363,7 @@ void InputSettings2::update_state()
 		{
 			for (const auto& c : emulated_controller->get_controllers())
 			{
-				page_data.m_controllers->Append(fmt::format("{} [{}]", c->display_name(), c->api_name()), new wxCustomData(c));
+				page_data.m_controllers->Append(fmt::format("{} [{}]", c->display_name(), InputAPI::display_name(c->api())), new wxCustomData(c));
 			}
 
 			if (page_data.m_controllers->GetCount() > 0)
@@ -870,7 +870,7 @@ void InputSettings2::on_controller_add(wxCommandEvent& event)
 
 	const auto api_type = wnd.get_type();
 	controller->connect();
-	const int index = page_data.m_controllers->Append(fmt::format("{} [{}]", controller->display_name(), to_string(api_type)), new wxCustomData(controller));
+	const int index = page_data.m_controllers->Append(fmt::format("{} [{}]", controller->display_name(), InputAPI::display_name(api_type)), new wxCustomData(controller));
 
 	page_data.m_controllers->Select(index);
 	
@@ -955,6 +955,7 @@ void InputSettings2::on_controller_settings(wxCommandEvent& event)
 	case InputAPI::WGIRawController:
 	case InputAPI::SDLController:
 	case InputAPI::DSUClient:
+	case InputAPI::RemoteGamePad:
 	{
 		DefaultControllerSettings wnd(this, wxGetMousePosition() + wxSize(5, 5), controller);
 		wnd.ShowModal();

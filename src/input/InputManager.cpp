@@ -40,6 +40,7 @@ InputManager::InputManager()
 #if HAS_DSU
 	create_provider<DSUControllerProvider>();
 #endif
+	create_provider<RemoteGamePadProvider>();
 #if defined(HAS_GAMECUBE) && HAS_GAMECUBE && defined(HAS_LIBUSB)
 	create_provider<GameCubeControllerProvider>();
 #endif
@@ -496,7 +497,7 @@ bool InputManager::save(size_t player_index, std::string_view filename)
 		// settings
 		const auto& settings = controller->get_settings();
 
-		if (controller->has_motion())
+		if (controller->has_motion() || controller->api() == InputAPI::RemoteGamePad)
 			controller_node.append_child("motion").append_child(pugi::node_pcdata).set_value(
 				fmt::format("{}", settings.motion).c_str());
 
@@ -745,6 +746,11 @@ ControllerProviderPtr InputManager::get_api_provider(InputAPI::Type api) const
 	
 	cemu_assert_debug(false);
 	return {};
+}
+
+std::shared_ptr<RemoteGamePadProvider> InputManager::get_remote_gamepad_provider() const
+{
+	return std::static_pointer_cast<RemoteGamePadProvider>(get_api_provider(InputAPI::RemoteGamePad));
 }
 
 ControllerProviderPtr InputManager::get_api_provider(InputAPI::Type api, const ControllerProviderSettings& settings)
